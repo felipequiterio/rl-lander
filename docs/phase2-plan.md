@@ -158,6 +158,26 @@ controllers degrade.
      depends on touchdown accuracy).
   4. **SAC**, whose replay buffer and entropy-driven exploration often cope better with this.
 
+- **Quick fix 1, glide-slope penalty instead of termination (2 seeds):** 0% success.
+  The dive was gone, but the agent then either flew ~100 s and fell in at 40+ m/s (with
+  phi = 0 at termination, crash and landing get the same total shaping) or, with phi
+  kept at termination, hovered until the propellant ran out (touching down looked
+  riskier than not).
+- **Fix 2: penalty + graded touchdown reward + start curriculum + -150 for running
+  out of propellant (4 seeds, 3M steps):** it works.
+  - Every seed produced checkpoints at 77-94% success over 100 fixed seeds, with
+    touchdown ~1.1 m/s vertical, ~0.2 m/s horizontal, ~5 m from the target, and no
+    cone violations.
+  - **But it's fuel-hungry:** 540-590 kg per landing (ZEM/ZEV: 352 kg). Almost all
+    failures are running out of propellant. Training success swings between 90% and
+    0% as small policy changes cross the budget, and all four final (3M-step) models
+    had drifted to 100% running dry.
+  - **Checkpoint selection by eval return** correlated only 0.12-0.28 with success. It
+    happened to keep good checkpoints here, but it isn't selecting for success.
+  - **Next:** raise `propellant_cost` (0.1 per kg makes 200 kg of waste cost only 20
+    points, cheaper than the safety a slow descent buys), and rank checkpoints by
+    success rate (with return as a tie-break) when the env reports it.
+
 ## Decisions to confirm
 
 1. **Glide-slope violation ends the episode.** That matches G-FOLD's hard constraint.

@@ -320,6 +320,23 @@ whatever the ending, so diving costs only the −100 terminal reward and saves p
 A real landing pays more, but exploration never finds one, because the cone ends
 exploratory episodes early. Fixing the training signal is Milestone 4; see the plan.
 
+**Getting PPO to land** took three changes, all options in `DescentConfig` / the
+run config:
+1. **Glide-slope penalty in training.** Below the cone costs reward instead of ending
+   the episode. It still never counts as success, so success rates are unaffected.
+2. **Graded touchdown reward.** A near miss earns partial credit that shrinks with how
+   badly it missed, so the agent has a gradient towards the narrow success window.
+3. **Start-condition curriculum.** Training starts low, close and slow, and widens to
+   the full start box over the first 60% of training (`curriculum:` in the config;
+   evaluation always uses the full box).
+
+With all three, 4/4 seeds produced checkpoints at 77-94% success over 100 fixed seeds,
+with soft, accurate touchdowns. **Known issue:** those policies are fuel-hungry. They
+use 540-590 kg against ZEM/ZEV's 352, almost every failure is running out of
+propellant, and by 3M steps every seed had drifted into running dry on 100% of
+episodes. Next: a higher propellant price, and choosing checkpoints by success rate
+instead of by return.
+
 **Tests:** `make test` checks the physics against closed forms:
 - free fall
 - hover

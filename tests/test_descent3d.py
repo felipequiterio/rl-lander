@@ -168,6 +168,51 @@ def test_glide_angle_margin():
     assert env.glide_angle_margin_deg(np.array([5.0, 0.0, 1.0])) == math.inf  # inside the zone
 
 
+def test_penalty_mode_continues_but_never_counts_as_success():
+    env = fresh_env(glide_slope_mode="penalty")
+    place(env, [40.0, 0.0, 2.0], [-30.0, 0.0, -1.0])  # below the cone, but heading into the zone
+    _, _, terminated, _, _ = hold_min_thrust(env)
+    assert not terminated and env.glide_violation_s > 0
+    # Then a perfect touchdown in the zone: physically a landing, but not a success.
+    place(env, [2.0, 0.0, 0.1], [0.0, 0.0, -1.0])
+    _, _, terminated, _, info = run_until_done(env)
+    assert env.outcome == "landed on target after glide-slope violation"
+    assert info["is_success"] is False
+
+
+def test_penalty_scales_with_depth():
+    shallow, deep = fresh_env(glide_slope_mode="penalty"), fresh_env(glide_slope_mode="penalty")
+    place(shallow, [400.0, 0.0, 100.0], [0.0, 0.0, 0.0])  # ~4 m below the cone
+    place(deep, [400.0, 0.0, 10.0], [0.0, 0.0, 0.0])  # ~94 m below
+    r_shallow, r_deep = hold_min_thrust(shallow)[1], hold_min_thrust(deep)[1]
+    assert r_deep < r_shallow
+
+
+def test_graded_touchdown_reward_orders_misses():
+    rewards = {}
+    for vz in (1.0, 3.0, 7.0, 40.0):
+        env = fresh_env(touchdown_reward="graded", glide_slope_deg=None)
+        place(env, [0, 0, 0.01], [0, 0, -vz])
+        hold_min_thrust(env)
+        rewards[vz] = env._terminal_reward(env.outcome)
+    assert rewards[1.0] == env.cfg.success_reward
+    assert rewards[1.0] > rewards[3.0] > rewards[7.0] > rewards[40.0] == env.cfg.graded_floor
+    assert rewards[3.0] == pytest.approx(env.cfg.graded_base - env.cfg.graded_per_ms * (3.0 - 2.0), abs=0.2)
+
+
+def test_curriculum_ranges():
+    env = make_env("descent3d").unwrapped
+    env.set_difficulty(0.0)
+    for seed in range(50):
+        obs, _ = env.reset(seed=seed)
+        assert 100 <= obs[2] <= 300 and np.hypot(obs[0], obs[1]) <= 50
+    env.set_difficulty(0.5)
+    assert env.start_range("altitude_range") == pytest.approx((550.0, 1150.0))
+    # difficulty 1 (the default) draws exactly the original start states
+    env.set_difficulty(1.0)
+    np.testing.assert_array_equal(env.reset(seed=7)[0], make_env("descent3d").reset(seed=7)[0])
+
+
 def test_out_of_propellant_terminates():
     env = fresh_env()
     place(env, [0, 0, 500], [0, 0, -10], propellant=0.5)  # ~0.34 s at minimum thrust

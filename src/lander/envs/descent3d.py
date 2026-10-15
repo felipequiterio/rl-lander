@@ -46,6 +46,13 @@ class DescentConfig:
     thrust_max: float = 27000.0  # N; its 60% throttle limit
     max_tilt_deg: float = 45.0  # thrust pointing limit, from vertical
     glide_slope_deg: float | None = 15.0  # min elevation above the landing zone; None disables
+    # "terminate": a violation ends the episode (the hard constraint, as in G-FOLD).
+    # "penalty": training aid. A violation costs reward every step spent below the cone and
+    # the episode continues, but the outcome still records it, so it never counts as a
+    # success. Success rates are therefore identical in both modes: the dynamics are the
+    # same until the first violation.
+    glide_slope_mode: str = "terminate"
+    glide_slope_penalty: float = 1.0  # per control step below the cone, x (1 + depth / 10 m)
     # --- success criteria (Apollo LM limits were 10 ft/s vertical, 4 ft/s horizontal) ---
     landing_radius: float = 10.0  # m
     max_touchdown_vz: float = 2.0  # m/s
@@ -59,15 +66,38 @@ class DescentConfig:
     offset_range: tuple[float, float] = (0.0, 1000.0)  # horizontal distance from target
     descent_rate_range: tuple[float, float] = (15.0, 40.0)
     horizontal_speed_range: tuple[float, float] = (0.0, 30.0)
+    # Curriculum: at difficulty 0 starts are drawn from the "easy" ranges below; at 1
+    # (the default) from the full ranges above; in between, linearly interpolated.
+    # Training ramps it up via set_difficulty(); evaluation always uses 1.
+    difficulty: float = 1.0
+    easy_altitude_range: tuple[float, float] = (100.0, 300.0)
+    easy_offset_range: tuple[float, float] = (0.0, 50.0)
+    easy_descent_rate_range: tuple[float, float] = (2.0, 10.0)
+    easy_horizontal_speed_range: tuple[float, float] = (0.0, 3.0)
     # --- reward ---
     shaping_scale: float = 100.0
     shaping_pos_scale: float = 1000.0  # m
     shaping_vel_scale: float = 50.0  # m/s
     shaping_gamma: float = 0.999  # should match the agent's gamma for the shaping guarantee
+    # True: phi = 0 at terminal states, which makes the shaping strictly potential-based
+    # (the optimal policy is provably unchanged), but the total shaping is then the same
+    # however the episode ends. False: keep phi at the final state, so an ending that is
+    # fast or far from the target stays penalised (LunarLander-style; a stronger learning
+    # signal, at the cost of the guarantee).
+    shaping_zero_at_terminal: bool = True
     propellant_cost: float = 0.1  # reward per kg burned
     success_reward: float = 100.0
     off_target_reward: float = -50.0
-    failure_reward: float = -100.0
+    failure_reward: float = -100.0  # crash (binary mode), glide-slope violation, out of propellant
+    # "binary": a touchdown pays success / off-target / failure reward.
+    # "graded": anything short of success earns partial credit that falls off with how far
+    # it missed (a 3 m/s touchdown scores far better than a 40 m/s impact), which gives
+    # the agent a gradient towards the narrow success window.
+    touchdown_reward: str = "binary"
+    graded_base: float = 50.0  # a near miss; a success still pays success_reward
+    graded_per_ms: float = 10.0  # per m/s over either speed limit
+    graded_per_m: float = 1.0  # per metre outside the landing zone
+    graded_floor: float = -100.0
 
     @property
     def m_min(self) -> float:
@@ -132,18 +162,27 @@ def rk4_step(r, v, m, thrust, dt, cfg: DescentConfig):
     return r_new, v_new, m_new
 
 
+RANGES = ("altitude_range", "offset_range", "descent_rate_range", "horizontal_speed_range")
+
+
 class Descent3DEnv(gym.Env):
     metadata: ClassVar[dict] = {"render_modes": [], "render_fps": 5}
 
     def __init__(self, render_mode: str | None = None, **overrides):
+        if overrides.get("glide_slope_mode", "terminate") not in ("terminate", "penalty"):
+            raise ValueError("glide_slope_mode must be 'terminate' or 'penalty'")
+        if overrides.get("touchdown_reward", "binary") not in ("binary", "graded"):
+            raise ValueError("touchdown_reward must be 'binary' or 'graded'")
         known = {f.name for f in fields(DescentConfig)}
         unknown = set(overrides) - known
         if unknown:
             raise TypeError(f"unknown descent3d parameters: {sorted(unknown)}")
-        for key in ("altitude_range", "offset_range", "descent_rate_range", "horizontal_speed_range"):
-            if key in overrides:  # YAML gives lists
-                overrides[key] = tuple(overrides[key])
+        for key in RANGES:  # YAML gives lists
+            for k in (key, "easy_" + key):
+                if k in overrides:
+                    overrides[k] = tuple(overrides[k])
         self.cfg = DescentConfig(**overrides)
+        self.difficulty = self.cfg.difficulty
         self.render_mode = render_mode  # drawing is done by the viewer's scene, not the env
         self.metadata = {**self.metadata, "render_fps": round(1 / self.cfg.control_dt)}
         self.action_space = gym.spaces.Box(-1.0, 1.0, (3,), np.float32)
@@ -152,6 +191,17 @@ class Descent3DEnv(gym.Env):
         lo = np.array([-1e4, -1e4, 0, -500, -500, -500, 0], np.float32)
         self.observation_space = gym.spaces.Box(lo, hi, dtype=np.float32)
         self.n_substeps = round(self.cfg.control_dt / self.cfg.physics_dt)
+
+    def set_difficulty(self, difficulty: float) -> None:
+        """Curriculum hook, called by training (see train.py's curriculum option)."""
+        self.difficulty = min(max(float(difficulty), 0.0), 1.0)
+
+    def start_range(self, name: str) -> tuple[float, float]:
+        full = getattr(self.cfg, name)
+        if self.difficulty >= 1.0:
+            return full
+        easy, d = getattr(self.cfg, "easy_" + name), self.difficulty
+        return easy[0] + (full[0] - easy[0]) * d, easy[1] + (full[1] - easy[1]) * d
 
     # --- helpers ----------------------------------------------------------------
 
@@ -179,6 +229,21 @@ class Descent3DEnv(gym.Env):
     def _obs(self) -> np.ndarray:
         return np.concatenate([self.r, self.v, [self.m - self.cfg.m_min]]).astype(np.float32)
 
+    def _terminal_reward(self, outcome: str) -> float:
+        c = self.cfg
+        if outcome == "landed on target":
+            return c.success_reward
+        if self.touchdown is None:  # glide-slope violation (terminate mode) or out of propellant
+            return c.failure_reward
+        if c.touchdown_reward == "binary":
+            return c.off_target_reward if outcome == "landed off target" else c.failure_reward
+        td = self.touchdown
+        miss = (
+            c.graded_per_ms * (max(0.0, td["vz"] - c.max_touchdown_vz) + max(0.0, td["vh"] - c.max_touchdown_vh))
+            + c.graded_per_m * max(0.0, td["position_error"] - c.landing_radius)
+        )
+        return max(c.graded_base - miss, c.graded_floor)
+
     def _classify_touchdown(self, r: np.ndarray, v: np.ndarray) -> str:
         c = self.cfg
         if -v[2] <= c.max_touchdown_vz and np.hypot(v[0], v[1]) <= c.max_touchdown_vh:
@@ -190,10 +255,10 @@ class Descent3DEnv(gym.Env):
     def reset(self, *, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         c, rng = self.cfg, self.np_random
-        alt = rng.uniform(*c.altitude_range)
-        dist, phi = rng.uniform(*c.offset_range), rng.uniform(0, 2 * math.pi)
-        vz = -rng.uniform(*c.descent_rate_range)
-        vh, psi = rng.uniform(*c.horizontal_speed_range), rng.uniform(0, 2 * math.pi)
+        alt = rng.uniform(*self.start_range("altitude_range"))
+        dist, phi = rng.uniform(*self.start_range("offset_range")), rng.uniform(0, 2 * math.pi)
+        vz = -rng.uniform(*self.start_range("descent_rate_range"))
+        vh, psi = rng.uniform(*self.start_range("horizontal_speed_range")), rng.uniform(0, 2 * math.pi)
         self.r = np.array([dist * math.cos(phi), dist * math.sin(phi), alt])
         self.v = np.array([vh * math.cos(psi), vh * math.sin(psi), vz])
         self.m = c.m0
@@ -202,6 +267,7 @@ class Descent3DEnv(gym.Env):
         self.outcome: str | None = None
         self.touchdown: dict[str, float] | None = None
         self.min_glide_margin_deg = self.glide_angle_margin_deg(self.r)
+        self.glide_violation_s = 0.0
         self._phi = self._potential()
         return self._obs(), {}
 
@@ -210,6 +276,7 @@ class Descent3DEnv(gym.Env):
         self.thrust = action_to_thrust(action, c)
         m_start = self.m
         outcome = None
+        depth = 0.0  # deepest glide-slope violation this step (penalty mode)
         for _ in range(self.n_substeps):
             r, v, m = rk4_step(self.r, self.v, self.m, self.thrust, c.physics_dt, c)
             if r[2] <= 0.0:
@@ -229,9 +296,13 @@ class Descent3DEnv(gym.Env):
             self.r, self.v, self.m = r, v, max(m, c.m_min)
             self.t += c.physics_dt
             self.min_glide_margin_deg = min(self.min_glide_margin_deg, self.glide_angle_margin_deg(r))
-            if self.glide_slope_margin(r) < 0:
-                outcome = "glide-slope violation"
-                break
+            margin = self.glide_slope_margin(r)
+            if margin < 0:
+                if c.glide_slope_mode == "terminate":
+                    outcome = "glide-slope violation"
+                    break
+                depth = max(depth, -margin)
+                self.glide_violation_s += c.physics_dt
             if m <= c.m_min:
                 outcome = "out of propellant"
                 break
@@ -239,14 +310,17 @@ class Descent3DEnv(gym.Env):
         terminated = outcome is not None
         truncated = not terminated and self.t >= c.max_time - 1e-9
         self.outcome = outcome or ("timeout" if truncated else None)
+        if self.outcome and self.glide_violation_s > 0:  # penalty mode: the violation is never forgotten
+            self.outcome = f"{self.outcome} after glide-slope violation"
 
-        # Potential-based shaping F = gamma * phi(s') - phi(s), with phi = 0 at terminal states
-        # (that's what keeps the optimal policy unchanged), plus the propellant cost.
-        phi_new = 0.0 if terminated else self._potential()
+        # Shaping F = gamma * phi(s') - phi(s) (see shaping_zero_at_terminal), plus the propellant cost.
+        phi_new = 0.0 if terminated and c.shaping_zero_at_terminal else self._potential()
         reward = c.shaping_scale * (c.shaping_gamma * phi_new - self._phi) - c.propellant_cost * (m_start - self.m)
         self._phi = phi_new
-        if terminated:
-            reward += {"landed on target": c.success_reward, "landed off target": c.off_target_reward}.get(outcome, c.failure_reward)
+        if depth > 0:
+            reward -= c.glide_slope_penalty * (1 + depth / 10.0)
+        if terminated:  # by how the episode physically ended; a violation was already penalised per step
+            reward += self._terminal_reward(outcome)
 
         info = {}
         if terminated or truncated:
@@ -275,5 +349,6 @@ def metrics(env: gym.Env, observations: list, actions: list) -> dict[str, float]
         "propellant_used_kg": u.cfg.m0 - u.m,
         # closest approach to the glide-slope cone outside the landing zone (inf if never outside)
         "min_glide_margin_deg": u.min_glide_margin_deg,
+        "glide_violation_s": u.glide_violation_s,  # time below the cone (penalty mode only)
         "flight_time_s": u.t,
     }

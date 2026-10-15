@@ -1,11 +1,16 @@
 # PPO on the Phase 2 3D point-mass lunar descent (src/lander/envs/descent3d.py).
-# First, untuned settings: LunarLander's PPO hyperparameters plus observation
-# normalisation, which this env needs (positions in metres, velocities in m/s,
-# propellant in kg).
+# LunarLander's PPO hyperparameters plus three changes that made it learn (see
+# docs/phase2-plan.md, "Findings"): glide-slope penalty instead of termination in
+# training, graded touchdown reward, and a start-condition curriculum. With these,
+# 4/4 seeds reach 77-94% success on the full task, but the policies burn 540-590 kg
+# of the 600 kg budget and drift into running dry late in training. Known issue.
 
 env:
   name: descent3d
-  kwargs: {}                  # any DescentConfig field can be overridden here
+  kwargs:
+    glide_slope_mode: penalty   # training aid; violations still never count as success
+    touchdown_reward: graded    # partial credit for near misses
+    failure_reward: -150.0      # out of propellant (or a violation) is worse than any crash
 
 algo: PPO
 seed: 0
@@ -15,6 +20,11 @@ n_envs: 16
 vec_env: dummy
 torch_threads: 1
 normalize: true               # observation normalisation (see checkpoints.py)
+curriculum:                   # start easy (low, close, slow), widen to the full start box
+  method: set_difficulty
+  start: 0.0
+  end: 1.0
+  ramp_fraction: 0.6
 
 eval:
   freq: 20_000

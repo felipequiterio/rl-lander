@@ -20,7 +20,7 @@ from pathlib import Path
 
 import torch
 import yaml
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
@@ -33,6 +33,28 @@ from lander.envs import get_spec, make_env
 
 def default_run_name(config_path: Path, seed: int) -> str:
     return f"{config_path.stem}_s{seed}_{time.strftime('%Y%m%d-%H%M%S')}"
+
+
+class CurriculumCallback(BaseCallback):
+    """Ramps a value linearly from ``start`` to ``end`` over the first ``ramp_fraction``
+    of training and passes it to every training env via ``env.<method>(value)``
+    (e.g. descent3d's set_difficulty). The eval env is left alone, so eval always
+    measures the full task."""
+
+    def __init__(self, method: str, start: float, end: float, ramp_steps: int):
+        super().__init__()
+        self.method, self.start, self.end, self.ramp_steps = method, start, end, max(ramp_steps, 1)
+
+    def _value(self) -> float:
+        return self.start + (self.end - self.start) * min(1.0, self.num_timesteps / self.ramp_steps)
+
+    def _on_rollout_start(self) -> None:
+        value = self._value()
+        self.training_env.env_method(self.method, value)
+        self.logger.record("curriculum/value", value)
+
+    def _on_step(self) -> bool:
+        return True
 
 
 def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
@@ -97,7 +119,11 @@ def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
     print(f"[{run_name}] training {cfg['total_timesteps']:,} steps -> {run_dir}", flush=True)
     t0 = time.time()
     try:
-        model.learn(total_timesteps=cfg["total_timesteps"], callback=eval_cb)
+        callbacks = [eval_cb]
+        if cur := cfg.get("curriculum"):
+            ramp = int(cur.get("ramp_fraction", 0.6) * cfg["total_timesteps"])
+            callbacks.append(CurriculumCallback(cur["method"], cur.get("start", 0.0), cur.get("end", 1.0), ramp))
+        model.learn(total_timesteps=cfg["total_timesteps"], callback=CallbackList(callbacks))
     except KeyboardInterrupt:
         print(f"[{run_name}] interrupted, saving final model", flush=True)
     finally:
