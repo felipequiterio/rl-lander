@@ -84,10 +84,16 @@ class FrameScene:
         self.size = (600, 400)
 
     def reset(self, env) -> None:
-        h, w = env.render().shape[:2]
+        try:
+            frame = env.render()
+        except NotImplementedError:
+            frame = None
+        if frame is None:
+            raise SystemExit(f"{env.unwrapped.__class__.__name__} has no viewer scene (EnvSpec.scene) and no rgb_array rendering")
+        h, w = frame.shape[:2]
         self.size = (w, h)
 
-    def update(self, env, action, dt) -> None:
+    def update(self, env, action, dt, frac: float = 1.0) -> None:
         pass
 
     def on_outcome(self, env, label) -> None:
@@ -144,7 +150,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--runs-dir", type=Path, default=Path("runs"))
     p.add_argument("--model", type=Path, help="replay this checkpoint instead of following the champion")
     p.add_argument("--env", help="env registry name for --model when the run's config.yaml can't be found")
-    p.add_argument("--fps", type=int, default=50, help="playback speed (LunarLander simulates 50 steps/s)")
+    p.add_argument("--fps", type=int, help="frames per second (default: real time; e.g. 150 = 3x for both envs)")
     p.add_argument("--scale", type=float, default=1.0, help="initial window size relative to the 1200x800 canvas")
     p.add_argument("--plain", action="store_true", help="use the env's own rendering instead of the custom scene")
     p.add_argument("--mute", action="store_true", help="start with sound off (toggle any time with M)")
@@ -154,7 +160,7 @@ def main(argv: list[str] | None = None) -> None:
     args = p.parse_args(argv)
 
     runs_dir = args.runs_dir.resolve()
-    display = Display(args.fps, args.scale)
+    display = Display(args.fps or 30, args.scale)
     hud = Hud()
     fx = SoundFx(enabled=not args.mute, volume=args.volume)
     display.on_key[pygame.K_m] = lambda: hud.show_toast("Sound on" if fx.toggle() else "Sound muted", 1.5)
@@ -168,14 +174,14 @@ def main(argv: list[str] | None = None) -> None:
     said_waiting = False
     t0 = time.monotonic()
 
-    def frame(dt: float, steps: int, ep_reward: float, pending: dict | None, banner=None) -> None:
+    def frame(sim_time: float, ep_reward: float, pending: dict | None, banner=None) -> None:
         canvas = display.use_canvas(scene.size)
         scene.draw(canvas, env)
         card = hud.model_card(canvas, mode, loaded, pending)
-        hud.toast(canvas, card, 1 / args.fps)
+        hud.toast(canvas, card, 1 / display.fps)
         hud.gauges(canvas, scene.gauges(env))
         tally = [(name, n, scene.outcome_tone(name)) for name, n in sorted(outcomes.items(), key=lambda kv: -kv[1])]
-        hud.episode_strip(canvas, episode, steps * dt, ep_reward, tally)
+        hud.episode_strip(canvas, episode, sim_time, ep_reward, tally)
         if banner:
             hud.banner(canvas, *banner)
         hud.sound_hint(canvas, fx.enabled, fx.available)
@@ -196,15 +202,24 @@ def main(argv: list[str] | None = None) -> None:
                 display.present()
             continue
         if loaded is None or target["model_path"] != loaded["model_path"]:
-            path = resolve_model_path(target, runs_dir)
+            # The env (and its scene) for this record first, then the policy.
+            new_key = (target["env"]["name"], repr(target["env"]["kwargs"]))
+            if new_key != env_key:
+                if env is not None:
+                    env.close()
+                spec = get_spec(target["env"]["name"])
+                scene = spec.scene() if spec.scene and not args.plain else FrameScene()
+                env = make_env(target["env"]["name"], render_mode=scene.render_mode, **target["env"]["kwargs"])
+                env_key = new_key
             try:
+                path = resolve_model_path(target, runs_dir)
                 model = load_policy(path, target.get("algo", "PPO"))
             except Exception as e:  # noqa: BLE001 - keep the viewer alive whatever goes wrong
-                print(f"failed to load {path}: {e!r}; retrying", flush=True)
+                print(f"failed to load {target['model_path']}: {e!r}; retrying", flush=True)
                 if model is None:
                     end = time.monotonic() + POLL_SECONDS
                     while time.monotonic() < end and not display.closed:
-                        hud.waiting(display.canvas, f"failed to load {path.name}, retrying", time.monotonic() - t0)
+                        hud.waiting(display.canvas, f"failed to load {Path(target['model_path']).name}, retrying", time.monotonic() - t0)
                         display.present()
                     continue
                 # Keep showing the previous champion; we'll retry after this episode.
@@ -214,16 +229,11 @@ def main(argv: list[str] | None = None) -> None:
                     fx.play("chime")
                 print(f"{'loaded' if loaded is None else 'hot-reloaded'} {path.name}: " + ", ".join(describe(target)), flush=True)
                 loaded = target
-                key = (target["env"]["name"], repr(target["env"]["kwargs"]))
-                if key != env_key:
-                    if env is not None:
-                        env.close()
-                    spec = get_spec(target["env"]["name"])
-                    scene = spec.scene() if spec.scene and not args.plain else FrameScene()
-                    env = make_env(target["env"]["name"], render_mode=scene.render_mode, **target["env"]["kwargs"])
-                    env_key = key
         spec = get_spec(loaded["env"]["name"])
         dt = 1.0 / env.metadata.get("render_fps", 50)  # simulated seconds per env step
+        # Scenes may draw several interpolated frames per env step (descent3d: 10 at 5 Hz).
+        substeps = getattr(scene, "substeps", 1)
+        display.fps = args.fps or round(substeps / dt)  # default: real time
 
         # --- One episode. ---
         episode += 1
@@ -237,9 +247,13 @@ def main(argv: list[str] | None = None) -> None:
             ep_reward += float(reward)
             steps += 1
             done = terminated or truncated
-            scene.update(env, action, dt)
-            c = source.poll() if source else None
-            frame(dt, steps, ep_reward, c if c and c["model_path"] != loaded["model_path"] else None)
+            for k in range(substeps):
+                frac = (k + 1) / substeps
+                scene.update(env, action, dt / substeps, frac=frac)
+                c = source.poll() if source else None
+                frame((steps - 1 + frac) * dt, ep_reward, c if c and c["model_path"] != loaded["model_path"] else None)
+                if display.closed:
+                    break
         if display.closed:
             break
 
@@ -253,14 +267,15 @@ def main(argv: list[str] | None = None) -> None:
         fx.play(scene.outcome_sound(result), scene.sound_levels(env)[1])
         title, subtitle, tone = scene.banner(result)
         subtitle = f"{subtitle}  \u00b7  reward {ep_reward:.1f}" if subtitle else f"reward {ep_reward:.1f}"
-        n_frames = int(OUTCOME_PAUSE_SECONDS * args.fps)
+        fps = display.fps
+        n_frames = int(OUTCOME_PAUSE_SECONDS * fps)
         for i in range(n_frames):
             if display.closed:
                 break
-            scene.update(env, None, dt)
-            fade = min(1.0, i / (0.15 * args.fps), (n_frames - i) / (0.3 * args.fps))
+            scene.update(env, None, dt / substeps)
+            fade = min(1.0, i / (0.15 * fps), (n_frames - i) / (0.3 * fps))
             c = source.poll() if source else None
-            frame(dt, steps, ep_reward, c if c and c["model_path"] != loaded["model_path"] else None, (title, subtitle, tone, fade))
+            frame(steps * dt, ep_reward, c if c and c["model_path"] != loaded["model_path"] else None, (title, subtitle, tone, fade))
 
     if env is not None:
         env.close()

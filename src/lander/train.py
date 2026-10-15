@@ -106,7 +106,7 @@ def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
     # over a policy that kept changing during the rollout.
     eval_cb = EvalCallback(
         eval_env,
-        callback_on_new_best=champion_cb,
+        callback_after_eval=champion_cb,  # ranks by success rate, then return (champion.score)
         n_eval_episodes=eval_cfg["n_episodes"],
         # EvalCallback counts calls, and each call advances all n_envs envs one step.
         eval_freq=max(eval_cfg["freq"] // cfg["n_envs"], 1),

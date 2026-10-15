@@ -16,6 +16,8 @@ configs/ppo_lunar.yaml      run config: env, seed, PPO hyperparameters (annotate
 src/lander/envs/            env registry: config name -> constructor, outcome classifier, scene
 src/lander/envs/lunar_lander_scene.py   the viewer's LunarLander renderer (lander, terrain, effects)
 src/lander/envs/descent3d.py            Phase 2: 3D point-mass lunar powered descent (G-FOLD problem)
+src/lander/envs/descent3d_scene.py      its viewer scene: zooming side view + top-down inset
+src/lander/envs/scene_art.py            art shared by the scenes (sky, Earth, lander sprite, glows)
 src/lander/controllers/     non-learned controllers with the policy API (ZEM/ZEV guidance; G-FOLD next)
 tests/                      pytest suite (`make test`)
 src/lander/train.py         one headless training run          (lander-train)
@@ -88,7 +90,8 @@ uv run lander-launch configs/ppo_lunar.yaml --seeds 0 1 2 3
 # Viewer (separate terminal). Start it before, during or after training.
 uv run lander-viewer
 uv run lander-viewer --model runs/<run>/best/step_000420000.zip   # replay one checkpoint
-uv run lander-viewer --fps 150 --scale 0.8                        # faster / smaller window
+uv run lander-viewer --fps 150 --scale 0.8                        # 3x speed, smaller window
+uv run lander-viewer --runs-dir runs/descent3d                    # the Phase 2 env (see below)
 uv run lander-viewer --plain                                      # the env's own basic rendering
 uv run lander-viewer --mute                                       # start silent (M toggles sound)
 
@@ -237,6 +240,14 @@ noisy, moving target. Every 10k steps, `EvalCallback` instead runs 10 fresh
 episodes with the policy's *mean* action (deterministic). The checkpoint with the
 highest mean of those is the run's best.
 
+If the env reports mission success (`info["is_success"]`, as `descent3d` does),
+checkpoints are ranked by **eval success rate first** and mean return only as a
+tie-break, both for each run's best and for the global champion. On `descent3d` the
+mean return correlated only about 0.2 with success, because the shaping depends
+heavily on the start condition, so ranking by return alone picked checkpoints almost
+at random. `champion.json`, `best.json`, the launcher's status table and the viewer's
+model card all show the success rate when it's available.
+
 **The winner's curse.** The mean of 10 episodes is still noisy (std is often
 50-150, so the mean is uncertain by ±20-50). Picking the maximum over ~100
 evaluations favours checkpoints that got lucky, so the champion's displayed score is
@@ -320,6 +331,24 @@ whatever the ending, so diving costs only the −100 terminal reward and saves p
 A real landing pays more, but exploration never finds one, because the cone ends
 exploratory episodes early. Fixing the training signal is Milestone 4; see the plan.
 
+**Watching it:** `make viewer RUNS=runs/descent3d` (or `uv run lander-viewer --runs-dir
+runs/descent3d`). Keep descent3d runs in their own runs dir: the viewer follows one
+champion per directory, and rewards from different envs aren't comparable.
+
+- **Side view:** looks along the approach direction. The camera follows the lander
+  and zooms in as it descends, from about 2.5 km wide at the start to tens of metres
+  at touchdown. The lander is drawn tilted to its thrust direction, with a plume that
+  scales with throttle.
+- **Glide slope:** the cone is drawn as shaded no-go wedges, and a distance ruler
+  along the ground adapts to the zoom.
+- **Top-down inset:** the 10 m landing zone, the horizontal track, a velocity arrow,
+  and a red ring showing the exact 3D glide-slope limit at the current altitude. The
+  lander must stay inside the ring, which only appears once it's small enough to fit.
+- **Telemetry:** altitude, vertical and horizontal speed, distance to target, thrust,
+  tilt, propellant and glide-slope margin.
+- **Playback:** the env decides at 5 Hz and the scene interpolates 10 frames per
+  decision, so playback is smooth and real time by default; `--fps 150` is 3x.
+
 **Getting PPO to land** took three changes, all options in `DescentConfig` / the
 run config:
 1. **Glide-slope penalty in training.** Below the cone costs reward instead of ending
@@ -334,8 +363,19 @@ With all three, 4/4 seeds produced checkpoints at 77-94% success over 100 fixed 
 with soft, accurate touchdowns. **Known issue:** those policies are fuel-hungry. They
 use 540-590 kg against ZEM/ZEV's 352, almost every failure is running out of
 propellant, and by 3M steps every seed had drifted into running dry on 100% of
-episodes. Next: a higher propellant price, and choosing checkpoints by success rate
-instead of by return.
+episodes. Watching it and measuring where the time goes shows why. Averaged over
+100 fixed seeds:
+
+| | above 100 m | 100 m to 20 m | last 20 m | total |
+|---|---|---|---|---|
+| PPO champion | 62 s, 355 kg | 25 s, 110 kg | 15 s, 63 kg | 102 s, 528 kg |
+| ZEM/ZEV | 52 s, 266 kg | 7 s, 51 kg | 5 s, 37 kg | 64 s, 355 kg |
+
+The policy creeps down the last 100 m (40 s against ZEM's 12), and every second near
+hover costs about 4.5 kg. Ranking checkpoints by success rate (now the default) fixed the selection
+problem: saved bests reach 98-100% success. Raising the propellant price on its own
+didn't help (at 0.5 per kg the agent prefers to crash). See the plan for the next
+iteration.
 
 **Tests:** `make test` checks the physics against closed forms:
 - free fall

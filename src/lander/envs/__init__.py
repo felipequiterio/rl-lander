@@ -53,6 +53,7 @@ REGISTRY: dict[str, EnvSpec] = {
         outcome=descent3d.outcome,
         success=descent3d.SUCCESS,
         metrics=descent3d.metrics,
+        scene=descent3d.scene,
     ),
 }
 

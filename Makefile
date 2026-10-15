@@ -6,7 +6,7 @@ CONFIG ?= configs/ppo_lunar.yaml
 SEED   ?= 0
 SEEDS  ?= 0 1 2 3
 RUNS   ?= runs
-FPS    ?= 50
+FPS    ?=
 STEPS  ?= 5e4
 MODEL  ?=
 EPISODES ?= 200
@@ -39,14 +39,14 @@ launch: ## Train several seeds in parallel: CONFIG, SEEDS
 	$(UV) lander-launch $(CONFIG) --seeds $(SEEDS) --runs-dir $(RUNS)
 
 viewer: ## Watch the current champion, hot-reloading (VIEWER_ARGS=--mute for silence)
-	$(UV) lander-viewer --runs-dir $(RUNS) --fps $(FPS) $(VIEWER_ARGS)
+	$(UV) lander-viewer --runs-dir $(RUNS) $(if $(FPS),--fps $(FPS)) $(VIEWER_ARGS)
 
 replay: ## Replay one checkpoint: MODEL=runs/<run>/best/step_*.zip
 	@test -n "$(MODEL)" || { echo "usage: make replay MODEL=runs/<run>/best/step_000420000.zip"; exit 1; }
-	$(UV) lander-viewer --model $(MODEL) --fps $(FPS) $(VIEWER_ARGS)
+	$(UV) lander-viewer --model $(MODEL) $(if $(FPS),--fps $(FPS)) $(VIEWER_ARGS)
 
 viewer-plain: ## Viewer with the env's own (plain) rendering
-	$(UV) lander-viewer --runs-dir $(RUNS) --fps $(FPS) --plain $(VIEWER_ARGS)
+	$(UV) lander-viewer --runs-dir $(RUNS) $(if $(FPS),--fps $(FPS)) --plain $(VIEWER_ARGS)
 
 eval: ## Evaluate on EPISODES fixed seeds: the champion, or MODEL="a.zip b.zip"
 	$(UV) lander-eval $(MODEL) --runs-dir $(RUNS) --episodes $(EPISODES)

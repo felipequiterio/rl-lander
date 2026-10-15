@@ -178,6 +178,33 @@ controllers degrade.
     points, cheaper than the safety a slow descent buys), and rank checkpoints by
     success rate (with return as a tie-break) when the env reports it.
 
+- **Fix 3: rank checkpoints by success rate, then return (done; pipeline-wide).**
+  The runs' saved bests became 100% (95% CI 98-100) and 98% success over 200 fixed
+  seeds, picked automatically. Ranking by return had picked checkpoints almost at random.
+- **Fix 4: higher propellant price (0.3 and 0.5 per kg, 2 seeds each, 3M steps): no.**
+  - **0.3:** propellant barely moved (526-531 kg), late training stayed unstable (2-16%
+    of post-ramp evals at >= 80% success), and the final models still run dry.
+  - **0.5:** never lands. It crashes deliberately, because at that price a landing's
+    propellant (about -180) costs more than a crash (-100).
+  - The propellant price only works together with a larger success reward. The late
+    collapse looks like a separate optimisation-stability issue.
+- **Next:** success +300 with propellant 0.3 per kg (a 360 kg landing nets about +190
+  against -100 for a crash), plus learning-rate and clip-range decay to zero (the
+  rl-zoo `lin_` schedules) against late-training drift.
+
+- **Milestone 2 (viewer scene): done.**
+  - Side view along the approach direction with a following, zooming camera; the
+    glide-slope cone as shaded no-go wedges; a distance ruler; the landing zone with
+    beacons.
+  - Top-down inset with the exact 3D cone limit at the current altitude.
+  - Telemetry, outcome banners and sounds.
+  - 10 interpolated frames per 5 Hz decision, so real-time playback is smooth.
+  - The shared art (sky, Earth, lander sprite) moved to `scene_art.py`; the
+    LunarLander scene renders pixel-identically to before.
+  - What it showed: the PPO champion spends 40 s in the last 100 m (ZEM/ZEV: 12 s),
+    which is about half of its 173 kg excess propellant. The rest is a less efficient
+    high-altitude phase.
+
 ## Decisions to confirm
 
 1. **Glide-slope violation ends the episode.** That matches G-FOLD's hard constraint.

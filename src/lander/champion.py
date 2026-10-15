@@ -41,6 +41,14 @@ def resolve_model_path(record: dict[str, Any], runs_dir: Path) -> Path:
     return (runs_dir / record["model_path"]).resolve()
 
 
+def score(record: dict[str, Any]) -> tuple[float, float]:
+    """How checkpoints are ranked: eval success rate first (when the env reports
+    success), mean eval return as the tie-break. Return alone can be a poor proxy;
+    on descent3d it correlated only ~0.2 with success."""
+    success = record.get("success_rate")
+    return (-1.0 if success is None else success, record["mean_reward"])
+
+
 def try_update_champion(runs_dir: Path, record: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
     """Make ``record`` the global champion if it beats the current one.
 
@@ -49,16 +57,16 @@ def try_update_champion(runs_dir: Path, record: dict[str, Any]) -> tuple[bool, d
     path = runs_dir / CHAMPION_FILE
     with FileLock(str(path) + ".lock", timeout=30):
         current = read_json(path)
-        if current is not None and current["mean_reward"] >= record["mean_reward"]:
+        if current is not None and score(current) >= score(record):
             return False, current
         atomic_write_json(path, record)
         return True, current
 
 
 class ChampionCallback(BaseCallback):
-    """Runs as ``EvalCallback(callback_on_new_best=...)``: fires each time this run's
-    mean eval reward reaches a new high. Saves an immutable checkpoint, updates the
-    run's best.json, and tries to become the global champion."""
+    """Runs as ``EvalCallback(callback_after_eval=...)``: after every evaluation, if this
+    checkpoint beats the run's best by ``score()``, saves an immutable checkpoint,
+    updates the run's best.json, and tries to become the global champion."""
 
     parent: EvalCallback
 
@@ -79,11 +87,20 @@ class ChampionCallback(BaseCallback):
         self.algo = algo
         self.solved_threshold = solved_threshold
         self.solved_logged = False
+        self.best: tuple[float, float] | None = None
 
     def _on_step(self) -> bool:
-        rewards = self.parent.evaluations_results[-1]  # episode returns from the eval just run
+        p = self.parent
+        rewards = p.evaluations_results[-1]  # episode returns from the eval just run
         mean, std = float(np.mean(rewards)), float(np.std(rewards))
         step = self.num_timesteps
+        # Success flags for this eval, if the env reports info["is_success"].
+        has_success = len(p.evaluations_successes) == len(p.evaluations_results)
+        success_rate = float(np.mean(p.evaluations_successes[-1])) if has_success else None
+        current = score({"success_rate": success_rate, "mean_reward": mean})
+        if self.best is not None and current <= self.best:
+            return True
+        self.best = current
 
         model_path = self.run_dir / "best" / f"step_{step:09d}.zip"
         atomic_save_checkpoint(self.model, model_path)
@@ -96,13 +113,15 @@ class ChampionCallback(BaseCallback):
             "mean_reward": mean,
             "std_reward": std,
             "n_eval_episodes": len(rewards),
+            "success_rate": success_rate,
             "solved": solved,
             "algo": self.algo,
             "env": self.env_cfg,
             "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         atomic_write_json(self.run_dir / "best.json", record)
-        print(f"[{self.run_name}] new run best at step {step:,}: {mean:.1f} +/- {std:.1f}", flush=True)
+        succ = f", success {success_rate:.0%}" if success_rate is not None else ""
+        print(f"[{self.run_name}] new run best at step {step:,}: {mean:.1f} +/- {std:.1f}{succ}", flush=True)
 
         if solved and not self.solved_logged:
             self.solved_logged = True
@@ -111,6 +130,11 @@ class ChampionCallback(BaseCallback):
 
         became, previous = try_update_champion(self.runs_dir, record)
         if became:
-            prev = f"{previous['mean_reward']:.1f} ({previous['run_name']})" if previous else "none"
-            print(f"[{self.run_name}] NEW GLOBAL CHAMPION: {mean:.1f} (previous: {prev})", flush=True)
+            prev = f"{_fmt(previous)} ({previous['run_name']})" if previous else "none"
+            print(f"[{self.run_name}] NEW GLOBAL CHAMPION: {_fmt(record)} (previous: {prev})", flush=True)
         return True
+
+
+def _fmt(record: dict[str, Any]) -> str:
+    s = f"{record['mean_reward']:.1f}"
+    return s + (f" / {record['success_rate']:.0%} success" if record.get("success_rate") is not None else "")

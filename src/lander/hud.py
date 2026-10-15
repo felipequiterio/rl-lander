@@ -109,6 +109,8 @@ class Hud:
         if record.get("mean_reward") is not None:
             n = record.get("n_eval_episodes")
             s = f"eval {record['mean_reward']:.1f} ± {record.get('std_reward', 0):.1f}" + (f"  ({n} ep)" if n else "")
+            if record.get("success_rate") is not None:
+                s += f"  {record['success_rate']:.0%} ok"
         else:
             s = "eval score unknown"
         self.text(surf, self.f_mono, s, (x, y))

@@ -331,6 +331,13 @@ class Descent3DEnv(gym.Env):
 # --- registry hooks ---------------------------------------------------------------
 
 
+def scene():
+    # Imported lazily: only the viewer needs pygame drawing code.
+    from lander.envs.descent3d_scene import Descent3DScene
+
+    return Descent3DScene()
+
+
 def make(render_mode: str | None = None, **kwargs) -> gym.Env:
     return Descent3DEnv(render_mode=render_mode, **kwargs)
 

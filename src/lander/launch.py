@@ -28,11 +28,13 @@ def status_table(runs: list[tuple[str, subprocess.Popen]], runs_dir: Path) -> st
     for name, proc in runs:
         best = read_json(runs_dir / name / "best.json")
         state = "running" if proc.poll() is None else f"exit {proc.returncode}"
-        score = f"{best['mean_reward']:8.1f} @ {best['timestep']:>9,}" if best else f"{'-':>8}"
+        succ = f" ({best['success_rate']:.0%} success)" if best and best.get("success_rate") is not None else ""
+        score = f"{best['mean_reward']:8.1f} @ {best['timestep']:>9,}{succ}" if best else f"{'-':>8}"
         rows.append(f"  {name:<40} {state:<9} best {score}")
     champ = read_json(runs_dir / CHAMPION_FILE)
     if champ:
-        rows.append(f"  champion: {champ['run_name']} {champ['mean_reward']:.1f} @ {champ['timestep']:,}")
+        succ = f" ({champ['success_rate']:.0%} success)" if champ.get("success_rate") is not None else ""
+        rows.append(f"  champion: {champ['run_name']} {champ['mean_reward']:.1f} @ {champ['timestep']:,}{succ}")
     return "\n".join(rows)
 
 
