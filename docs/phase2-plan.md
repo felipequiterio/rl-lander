@@ -215,6 +215,16 @@ controllers degrade.
   - The glide-slope limit shown as a ring at the lander's altitude.
   - About 6 ms per frame on the GPU, about 18 ms on the software renderer; 2D fallback.
 
+- **Real terrain (branch `real-terrain`):** the 3D ground is the Apollo 11 landing site
+  from LROC NAC imagery (0.5 m/px near the target, 2 m/px over 4.2 x 5.2 km, tiled
+  beyond).
+  - The sun direction is fitted from the 2 m DTM against the photo's brightness, so the
+    lander's lighting and shadow match the imagery.
+  - The landing target sits 25 m south of the real Apollo 11 descent stage, which is
+    visible and labelled.
+  - The physics ground stays flat (imagery only). If the real relief should ever enter
+    the dynamics, the DTM is there; but it would also change the G-FOLD problem.
+
 ## Decisions to confirm
 
 1. **Glide-slope violation ends the episode.** That matches G-FOLD's hard constraint.

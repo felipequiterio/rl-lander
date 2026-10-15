@@ -122,9 +122,15 @@ GROUND_FS = """
 uniform sampler2D u_craters; uniform sampler2D u_detail; uniform sampler2DShadow u_shadow;
 uniform vec3 u_sun; uniform vec3 u_eye; uniform float u_extent; uniform float u_detail_tile;
 uniform float u_zone_r; uniform vec3 u_zone_color; uniform vec3 u_glow_pos; uniform float u_glow;
+uniform int u_site; uniform sampler2D u_near; uniform sampler2D u_far;
+uniform vec4 u_near_rect; uniform vec4 u_far_rect; uniform float u_site_gain;
 in vec3 v_world; in vec4 v_light;
 out vec4 f_color;
 """ + SHADOW_FN + """
+float inside(vec2 uv, float edge) {  // 1 inside the unit square, fading to 0 over `edge` at the borders
+    vec2 e = smoothstep(vec2(0.0), vec2(edge), uv) * (1.0 - smoothstep(vec2(1.0 - edge), vec2(1.0), uv));
+    return e.x * e.y;
+}
 void main() {
     vec2 p = v_world.xy;
     float r = length(p);
@@ -157,6 +163,32 @@ void main() {
     col += vec3(1.0, 0.55, 0.22) * u_glow * exp(-g * g / 60.0);
     // gentle darkening towards the horizon
     col *= 1.0 - 0.35 * smoothstep(3000.0, 15000.0, de);
+    if (u_site == 1) {
+        // Real orthophotos: the shading (and the sun's shadows) is baked in, so they're
+        // used as lit colour; only the lander's own shadow and fine detail are added.
+        vec2 fu = (p - u_far_rect.xy) / (u_far_rect.zw - u_far_rect.xy);
+        vec2 nu = (p - u_near_rect.xy) / (u_near_rect.zw - u_near_rect.xy);
+        float wf = 1.0;  // the photo (tiled beyond its edges) covers the whole ground
+        float wn = inside(nu, 0.06);
+        // Beyond the imported area, tile the real image: two half-offset copies, each
+        // fading out at its own edges, so no seams show. (Not mirrored: that would flip
+        // the baked-in shadows.) textureGrad keeps mip selection smooth across the wrap.
+        vec2 gx = dFdx(fu), gy = dFdy(fu);
+        vec2 t1 = fract(fu), t2 = fract(fu + 0.5);
+        float a1 = min(min(t1.x, 1.0 - t1.x), min(t1.y, 1.0 - t1.y)) + 1e-4;
+        float a2 = min(min(t2.x, 1.0 - t2.x), min(t2.y, 1.0 - t2.y)) + 1e-4;
+        float tiled = (textureGrad(u_far, t1, gx, gy).r * a1 + textureGrad(u_far, t2, gx, gy).r * a2) / (a1 + a2);
+        float vfar = mix(tiled, textureGrad(u_far, clamp(fu, 0.0, 1.0), gx, gy).r, inside(fu, 0.03));
+        float v = mix(vfar, texture(u_near, nu).r, wn);
+        vec3 real = vec3(1.0, 0.985, 0.95) * v * u_site_gain;
+        real *= mix(1.0, 0.8 + 0.4 * d.a, dw * 0.7);  // close-up grain beyond the photo's 0.5 m pixels
+        real *= mix(0.22, 1.0, sh);
+        real *= 1.0 - 0.35 * smoothstep(3000.0, 15000.0, de);
+        col = mix(col, real, wf);
+        // re-apply the landing-zone markings and engine light on top of the photo
+        col = mix(col, u_zone_color * 0.9, max(ring, cross_) * 0.9 * wf);
+        col += vec3(1.0, 0.55, 0.22) * u_glow * exp(-g * g / 60.0) * wf;
+    }
     f_color = vec4(col, 1.0);
 }
 """
@@ -292,8 +324,12 @@ class Frame:
 
 
 class Renderer:
-    def __init__(self, model: AssembledModel, size=(1200, 800), zone_radius=10.0, glide_slope_deg: float | None = 15.0):
+    def __init__(self, model: AssembledModel, size=(1200, 800), zone_radius=10.0, glide_slope_deg: float | None = 15.0,
+                 site: dict | None = None):
         self.size = size
+        self.site = site
+        self.sun = site["sun_dir"] if site else SUN_DIR  # a real site brings its own sun (fitted to its imagery)
+        self.earth = site["earth_dir"] if site else EARTH_DIR
         self.ctx = ctx = create_context()
         self.gpu = ctx.info.get("GL_RENDERER", "?")
         self.software = "llvmpipe" in self.gpu.lower() or "softpipe" in self.gpu.lower()
@@ -314,6 +350,11 @@ class Renderer:
 
         self._upload_model(model)
         self._make_ground()
+        if site is not None:
+            self.tex_near = self._texture1(site["near"])
+            self.tex_far = self._texture1(site["far"])
+            # match the photo's mean brightness to what the procedural ground shows under the same sun
+            self.site_gain = 0.34 / max(site["meta"].get("mean_brightness", 0.5), 1e-3)
         self._make_sky()
         self._make_cone()
         self._make_plume()
@@ -343,6 +384,15 @@ class Renderer:
             tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
             tex.anisotropy = 8.0
         tex.repeat_x = tex.repeat_y = repeat
+        return tex
+
+    def _texture1(self, gray: np.ndarray) -> moderngl.Texture:
+        h, w = gray.shape
+        tex = self.ctx.texture((w, h), 1, np.ascontiguousarray(gray, np.uint8).tobytes())
+        tex.build_mipmaps()
+        tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        tex.anisotropy = 8.0
+        tex.repeat_x = tex.repeat_y = False
         return tex
 
     def _load_texture(self, folder: Path | None, name: str) -> moderngl.Texture:
@@ -439,12 +489,13 @@ class Renderer:
         near = max(0.25, min(dist * 0.02, 5.0))
         view = look_at(f.eye, f.look)
         vp = FLIP_Y @ perspective(f.fov, w / h, near, 60000.0) @ view
+        self.last_vp = vp  # for projecting labels onto the rendered image
 
         # Shadow map: an orthographic view from the sun, centred on the lander. The
         # shadow on the ground lies along the same sun ray, so it's always in frame.
-        light_eye = lander_pos + SUN_DIR * 60.0
+        light_eye = lander_pos + self.sun * 60.0
         alt = max(lander_pos[2], 0.0)
-        light_vp = ortho(self.model_radius + 6, self.model_radius + 6, 1.0, 60.0 + (alt + 20) / SUN_DIR[2] + 50) @ look_at(light_eye, lander_pos)
+        light_vp = ortho(self.model_radius + 6, self.model_radius + 6, 1.0, 60.0 + (alt + 20) / self.sun[2] + 50) @ look_at(light_eye, lander_pos)
         self.shadow_fbo.use()
         self.shadow_fbo.clear(depth=1.0)
         ctx.enable(moderngl.DEPTH_TEST)
@@ -471,16 +522,25 @@ class Renderer:
         self.tex_detail.use(location=1)
         g = self.p_ground
         for k, v in (("u_vp", gl(vp)), ("u_light_vp", gl(light_vp)), ("u_craters", 0), ("u_detail", 1), ("u_shadow", 2),
-                     ("u_sun", tuple(SUN_DIR)), ("u_eye", tuple(f.eye)), ("u_extent", terrain.EXTENT),
+                     ("u_sun", tuple(self.sun)), ("u_eye", tuple(f.eye)), ("u_extent", terrain.EXTENT),
                      ("u_detail_tile", terrain.DETAIL_TILE), ("u_zone_r", self.zone_radius), ("u_zone_color", f.zone_color),
                      ("u_glow_pos", tuple(f.ground_glow[:3])), ("u_glow", f.ground_glow[3])):
             self._set(g, k, v)
+        if self.site is not None:
+            self.tex_near.use(location=3)
+            self.tex_far.use(location=4)
+            meta = self.site["meta"]
+            for k, v in (("u_site", 1), ("u_near", 3), ("u_far", 4), ("u_near_rect", tuple(meta["near"]["rect"])),
+                         ("u_far_rect", tuple(meta["far"]["rect"])), ("u_site_gain", self.site_gain)):
+                self._set(g, k, v)
+        else:
+            self._set(g, "u_site", 0)
         self.vao_ground.render(moderngl.TRIANGLE_STRIP)
 
         # lander
         m = self.p_mesh
         for k, v in (("u_vp", gl(vp)), ("u_model", gl(f.lander_model)), ("u_light_vp", gl(light_vp)), ("u_shadow", 2),
-                     ("u_tex", 0), ("u_sun", tuple(SUN_DIR)), ("u_eye", tuple(f.eye)), ("u_char", 1.0 if f.charred else 0.0)):
+                     ("u_tex", 0), ("u_sun", tuple(self.sun)), ("u_eye", tuple(f.eye)), ("u_char", 1.0 if f.charred else 0.0)):
             self._set(m, k, v)
         for vao, _, tex, color in self.parts:
             tex.use(location=0)
@@ -535,7 +595,7 @@ class Renderer:
         for k, v in (("u_vp", gl(vp)), ("u_right", tuple(right)), ("u_up", tuple(up))):
             self._set(self.p_bb, k, v)
             self._set(self.p_sprite, k, v)
-        sun = np.array([[*(f.eye + SUN_DIR * 30000.0), 900.0, 1.0, 0.95, 0.85, 1.0]], "f4")
+        sun = np.array([[*(f.eye + self.sun * 30000.0), 900.0, 1.0, 0.95, 0.85, 1.0]], "f4")
         glow = np.concatenate([sun, np.asarray(f.glow, "f4").reshape(-1, 8)]) if f.glow else sun
         self._draw_billboards(glow, soft=False)
         if f.soft:
@@ -543,7 +603,7 @@ class Renderer:
             self._draw_billboards(np.asarray(f.soft, "f4").reshape(-1, 8), soft=True)
         # Earth, low in the sky
         ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
-        self.sprite_inst.write(np.array([[*(f.eye + EARTH_DIR * 30000.0), 540.0, 1, 1, 1, 1]], "f4").tobytes())
+        self.sprite_inst.write(np.array([[*(f.eye + self.earth * 30000.0), 540.0, 1, 1, 1, 1]], "f4").tobytes())
         self.tex_earth.use(location=0)
         self._set(self.p_sprite, "u_tex", 0)
         self.vao_sprite.render(moderngl.TRIANGLE_STRIP, instances=1)

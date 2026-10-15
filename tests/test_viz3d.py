@@ -73,6 +73,29 @@ def test_bundled_lm_loads_at_real_scale():
     assert (BUNDLE_DIR / "ATTRIBUTION.md").exists()
 
 
+def test_lroc_projection_finds_tranquility_base():
+    from lander.viz3d.import_lroc import DTM, LM_LAT, LM_LON, ORTHO, pixel
+
+    s, line = pixel(ORTHO, LM_LAT, LM_LON)
+    assert abs(s - 6113.7) < 1 and abs(line - 34103.9) < 1  # verified visually: the descent stage is there
+    sd, ld = pixel(DTM, LM_LAT, LM_LON)
+    assert abs(4 * sd - s) < 2 and abs(4 * ld - line) < 2  # the 2 m DTM and 0.5 m orthophoto line up
+
+
+def test_apollo11_site_loads():
+    from lander.viz3d.terrain import load_site
+
+    site = load_site("apollo11")
+    assert site is not None, "run `make import-terrain`"
+    meta = site["meta"]
+    x0, y0, x1, y1 = meta["near"]["rect"]
+    assert x0 < 0 < x1 and y0 < 0 < y1  # the landing target is inside the 0.5 m image
+    assert site["near"].shape == (2048, 2048) and site["far"].ndim == 2
+    assert np.isclose(np.linalg.norm(site["sun_dir"]), 1.0) and 0 < site["sun_dir"][2] < 0.6  # a low sun
+    assert site["sun_dir"][0] < -0.8  # in the west: the photo's shadows point east
+    assert load_site("nowhere") is None
+
+
 BDB = os.environ.get("LANDER_BDB")
 
 
@@ -114,6 +137,23 @@ def test_renderer_draws_a_frame():
     assert surf.get_size() == (320, 200)
     px = pygame.surfarray.array3d(surf)
     assert px.max() > 60 and px[:, 100:].mean() > 5  # something lit, ground below the horizon
+
+
+@needs_gl
+def test_renderer_draws_real_terrain():
+    import pygame
+
+    from lander.viz3d.glmath import model_matrix
+    from lander.viz3d.procedural import procedural_lm
+    from lander.viz3d.renderer import Frame, Renderer
+    from lander.viz3d.terrain import load_site
+
+    pygame.init()
+    r = Renderer(procedural_lm(), size=(320, 200), site=load_site("apollo11"))
+    surf = r.render(Frame(eye=np.array([0.0, -60.0, 20.0]), look=np.array([0.0, 20.0, 0.0]), fov=50,
+                          lander_model=model_matrix(np.array([0.0, 0.0, 30.0]), np.eye(3))))
+    ground = pygame.surfarray.array3d(surf)[:, 120:].astype(float)
+    assert ground.mean() > 30 and ground.std() > 5  # the photo, not a flat colour
 
 
 @needs_gl
