@@ -1,0 +1,49 @@
+# PPO on descent3d over real terrain: the Apollo 17 landing site in the Taurus-Littrow
+# valley (LROC terrain model, 5 m posts, 1.4 km of relief within 5 km of the LM).
+# Each episode lands on a random gentle spot of the site; the policy also sees a radar
+# altimeter, the terrain profile to the target and predicted clearances ahead (see
+# src/lander/envs/descent3d.py). The curriculum ramps the relief from flat to real
+# along with the start conditions. Otherwise the settings of configs/ppo_descent3d.yaml.
+# Propellant is priced at 0.1/kg: at the flat champion's 0.3, 8/8 seeds over terrain
+# settled on free-falling into the ground (cheap on propellant), while 0.3 on flat
+# ground and 0.1 on terrain both learn to land with the same code and seeds.
+
+env:
+  name: descent3d
+  kwargs:
+    terrain: apollo17
+    target_max_dist: 2300.0     # within the 1.2 m/px imagery around the historic LM (for the viewer)
+    glide_slope_mode: penalty   # training aid; violations still never count as success
+    touchdown_reward: graded    # partial credit for near misses
+    failure_reward: -150.0      # out of propellant (or a violation) is worse than any crash
+    propellant_cost: 0.1
+
+algo: PPO
+seed: 0
+total_timesteps: 3_000_000
+
+n_envs: 16
+vec_env: dummy
+torch_threads: 1
+normalize: true               # observation normalisation (see checkpoints.py)
+curriculum:                   # start easy (flat, low, close, slow), widen to the real site
+  method: set_difficulty
+  start: 0.0
+  end: 1.0
+  ramp_fraction: 0.6
+
+eval:
+  freq: 20_000
+  n_episodes: 20
+  n_envs: 5
+
+ppo:
+  n_steps: 1024
+  batch_size: 64
+  n_epochs: 4
+  gamma: 0.999                # matches the env's shaping_gamma, which the shaping guarantee assumes
+  gae_lambda: 0.98
+  ent_coef: 0.01
+  learning_rate: 3.0e-4
+  policy_kwargs:
+    net_arch: [64, 64]

@@ -17,6 +17,14 @@ See docs/phase2-plan.md for the design rationale. In short:
 - Control at 1/control_dt Hz. Thrust is held constant over each control step while RK4
   integrates at physics_dt.
 
+Uneven terrain (``terrain="apollo17"``): the ground becomes a real LROC terrain model
+of a landing site (see lander.envs.ground). Each episode draws a gentle spot on it as
+the target; the frame stays target-centred with z = 0 at the target's ground level.
+Touchdown happens where the ground is, and a lander that sets down softly on ground
+steeper than max_landing_slope_deg tips over. The observation gains what a real lander
+measures or knows from its map: a radar altimeter, the terrain profile along the
+straight line to the target, and predicted clearances along the current velocity.
+
 All parameters live in DescentConfig and can be overridden from a run config's
 ``env.kwargs``.
 """
@@ -29,6 +37,8 @@ from typing import ClassVar
 
 import gymnasium as gym
 import numpy as np
+
+from lander.envs.ground import Heightmap
 
 G0 = 9.80665
 
@@ -98,6 +108,19 @@ class DescentConfig:
     graded_per_ms: float = 10.0  # per m/s over either speed limit
     graded_per_m: float = 1.0  # per metre outside the landing zone
     graded_floor: float = -100.0
+    graded_per_deg: float = 10.0  # per degree of ground slope over max_landing_slope_deg
+    # --- uneven terrain ---
+    # Real landing site(s) from src/lander/assets/terrain_<site> (e.g. "apollo17", or a
+    # list to draw from per episode); None = flat ground at z = 0 (the original task).
+    terrain: str | tuple[str, ...] | None = None
+    target_max_slope_deg: float = 6.0  # targets are drawn where the zone (and the legs) is this flat
+    terrain_margin: float = 1300.0  # m from a target to the map's edge, so the flight stays on the map
+    target_max_dist: float | None = None  # m from the site's historic LM; None = anywhere on the map
+    max_landing_slope_deg: float = 12.0  # Apollo LM design limit; steeper ground tips the lander over
+    footprint_radius: float = 4.7  # m, centre to footpad (the LM's pads were 9.4 m apart)
+    min_start_agl: float = 300.0  # m; a start over high ground is raised to this clearance (or its own altitude, if lower)
+    profile_points: int = 8  # terrain samples along the straight line to the target
+    lookahead_s: tuple[float, ...] = (2.0, 5.0, 10.0, 20.0)  # predicted-clearance horizons
 
     @property
     def m_min(self) -> float:
@@ -181,6 +204,9 @@ class Descent3DEnv(gym.Env):
             for k in (key, "easy_" + key):
                 if k in overrides:
                     overrides[k] = tuple(overrides[k])
+        for k in ("terrain", "lookahead_s"):
+            if isinstance(overrides.get(k), list):
+                overrides[k] = tuple(overrides[k])
         self.cfg = DescentConfig(**overrides)
         self.difficulty = self.cfg.difficulty
         self.render_mode = render_mode  # drawing is done by the viewer's scene, not the env
@@ -189,11 +215,31 @@ class Descent3DEnv(gym.Env):
         # [r (m), v (m/s), propellant remaining (kg)]; generous physical bounds
         hi = np.array([1e4, 1e4, 1e4, 500, 500, 500, self.cfg.propellant], np.float32)
         lo = np.array([-1e4, -1e4, 0, -500, -500, -500, 0], np.float32)
+        # Uneven terrain: the sites and their candidate targets, and the extra observations:
+        # [altitude above ground, terrain profile to the target, clearances ahead] (m).
+        names = (self.cfg.terrain,) if isinstance(self.cfg.terrain, str) else self.cfg.terrain or ()
+        self.sites = [Heightmap.load(n) for n in names]
+        self.targets = [
+            m.safe_targets(self.cfg.target_max_slope_deg, self.cfg.landing_radius + self.cfg.footprint_radius, self.cfg.terrain_margin,
+                           self.cfg.target_max_dist)
+            for m in self.sites
+        ]
+        for m, t in zip(self.sites, self.targets, strict=True):
+            if len(t) == 0:
+                raise ValueError(f"terrain {m.name!r}: no target flat enough (target_max_slope_deg, terrain_margin, target_max_dist)")
+        if self.sites:
+            n = 1 + self.cfg.profile_points + len(self.cfg.lookahead_s)
+            hi, lo = np.concatenate([hi, np.full(n, 1e4, np.float32)]), np.concatenate([lo, np.full(n, -1e4, np.float32)])
+            self._fracs = [(k + 1) / (self.cfg.profile_points + 1) for k in range(self.cfg.profile_points)]
         self.observation_space = gym.spaces.Box(lo, hi, dtype=np.float32)
         self.n_substeps = round(self.cfg.control_dt / self.cfg.physics_dt)
+        self.site: Heightmap | None = None
+        self.target_site = np.zeros(3)  # the target in the site frame (x, y, ground height)
+        self.relief = 1.0
 
     def set_difficulty(self, difficulty: float) -> None:
-        """Curriculum hook, called by training (see train.py's curriculum option)."""
+        """Curriculum hook, called by training (see train.py's curriculum option). On
+        uneven terrain it also scales the relief (0 = flat, 1 = the real site)."""
         self.difficulty = min(max(float(difficulty), 0.0), 1.0)
 
     def start_range(self, name: str) -> tuple[float, float]:
@@ -204,6 +250,21 @@ class Descent3DEnv(gym.Env):
         return easy[0] + (full[0] - easy[0]) * d, easy[1] + (full[1] - easy[1]) * d
 
     # --- helpers ----------------------------------------------------------------
+
+    def ground_height(self, x: float, y: float) -> float:
+        """Ground height (m) at (x, y) in the env's frame: 0 at the target, 0 everywhere on flat ground."""
+        if self.site is None:
+            return 0.0
+        tx, ty, tz = self.target_site
+        return self.relief * (self.site.height(tx + x, ty + y) - tz)
+
+    def ground_slope_deg(self, x: float, y: float) -> float:
+        """Ground slope under a lander standing at (x, y): from the heights at its footpads."""
+        if self.site is None:
+            return 0.0
+        R, g = self.cfg.footprint_radius, self.ground_height
+        gx, gy = (g(x + R, y) - g(x - R, y)) / (2 * R), (g(x, y + R) - g(x, y - R)) / (2 * R)
+        return math.degrees(math.atan(math.hypot(gx, gy)))
 
     def glide_slope_margin(self, r: np.ndarray) -> float:
         """Metres above the glide-slope cone (negative = violated). The cone rises
@@ -227,7 +288,16 @@ class Descent3DEnv(gym.Env):
         return -(np.linalg.norm(self.r) / c.shaping_pos_scale + np.linalg.norm(self.v) / c.shaping_vel_scale)
 
     def _obs(self) -> np.ndarray:
-        return np.concatenate([self.r, self.v, [self.m - self.cfg.m_min]]).astype(np.float32)
+        base = [*self.r, *self.v, self.m - self.cfg.m_min]
+        if self.site is None and not self.sites:
+            return np.array(base, np.float32)
+        (x, y, z), (vx, vy, vz), g = self.r, self.v, self.ground_height
+        agl = z - g(x, y)
+        # terrain height minus the straight line from the vehicle down to the target (> 0: it's in the way)
+        profile = [g(x * (1 - f), y * (1 - f)) - z * (1 - f) for f in self._fracs]
+        # clearance above the ground where the current velocity leads (< 0: on course to hit it)
+        ahead = [(z + vz * t) - g(x + vx * t, y + vy * t) for t in self.cfg.lookahead_s]
+        return np.array([*base, agl, *profile, *ahead], np.float32)
 
     def _terminal_reward(self, outcome: str) -> float:
         c = self.cfg
@@ -241,12 +311,15 @@ class Descent3DEnv(gym.Env):
         miss = (
             c.graded_per_ms * (max(0.0, td["vz"] - c.max_touchdown_vz) + max(0.0, td["vh"] - c.max_touchdown_vh))
             + c.graded_per_m * max(0.0, td["position_error"] - c.landing_radius)
+            + c.graded_per_deg * max(0.0, td["slope_deg"] - c.max_landing_slope_deg)
         )
         return max(c.graded_base - miss, c.graded_floor)
 
-    def _classify_touchdown(self, r: np.ndarray, v: np.ndarray) -> str:
+    def _classify_touchdown(self, r: np.ndarray, v: np.ndarray, slope_deg: float) -> str:
         c = self.cfg
         if -v[2] <= c.max_touchdown_vz and np.hypot(v[0], v[1]) <= c.max_touchdown_vh:
+            if slope_deg > c.max_landing_slope_deg:
+                return "tipped over"
             return "landed on target" if np.hypot(r[0], r[1]) <= c.landing_radius else "landed off target"
         return "crashed"
 
@@ -259,13 +332,24 @@ class Descent3DEnv(gym.Env):
         dist, phi = rng.uniform(*self.start_range("offset_range")), rng.uniform(0, 2 * math.pi)
         vz = -rng.uniform(*self.start_range("descent_rate_range"))
         vh, psi = rng.uniform(*self.start_range("horizontal_speed_range")), rng.uniform(0, 2 * math.pi)
-        self.r = np.array([dist * math.cos(phi), dist * math.sin(phi), alt])
+        if self.sites:  # uneven terrain: a site, a gentle spot on it, and the relief for this stage of the curriculum
+            k = int(rng.integers(len(self.sites)))
+            self.site = self.sites[k]
+            tx, ty = self.targets[k][int(rng.integers(len(self.targets[k])))]
+            self.target_site = np.array([tx, ty, self.site.height(tx, ty)])
+            self.relief = self.difficulty
+        x, y = dist * math.cos(phi), dist * math.sin(phi)
+        # Over high ground, raise the start to keep clearance (at most the sampled altitude
+        # itself, so on flat ground the curriculum's low starts stay as they are).
+        alt = max(alt, self.ground_height(x, y) + min(c.min_start_agl, alt))
+        self.r = np.array([x, y, alt])
         self.v = np.array([vh * math.cos(psi), vh * math.sin(psi), vz])
         self.m = c.m0
         self.t = 0.0
         self.thrust = np.zeros(3)
         self.outcome: str | None = None
         self.touchdown: dict[str, float] | None = None
+        self.min_clearance = self.r[2] - self.ground_height(self.r[0], self.r[1])
         self.min_glide_margin_deg = self.glide_angle_margin_deg(self.r)
         self.glide_violation_s = 0.0
         self._phi = self._potential()
@@ -279,21 +363,26 @@ class Descent3DEnv(gym.Env):
         depth = 0.0  # deepest glide-slope violation this step (penalty mode)
         for _ in range(self.n_substeps):
             r, v, m = rk4_step(self.r, self.v, self.m, self.thrust, c.physics_dt, c)
-            if r[2] <= 0.0:
+            clearance = r[2] - self.ground_height(r[0], r[1])
+            if clearance <= 0.0:
                 # Interpolate to the moment of ground contact for accurate touchdown values.
-                f = self.r[2] / (self.r[2] - r[2])
+                before = self.r[2] - self.ground_height(self.r[0], self.r[1])
+                f = before / (before - clearance)
                 r, v, m = self.r + f * (r - self.r), self.v + f * (v - self.v), self.m + f * (m - self.m)
-                r[2] = 0.0
+                r[2] = self.ground_height(r[0], r[1])
                 self.t += f * c.physics_dt
                 self.r, self.v, self.m = r, v, m
-                outcome = self._classify_touchdown(r, v)
+                slope = self.ground_slope_deg(r[0], r[1])
+                outcome = self._classify_touchdown(r, v, slope)
                 self.touchdown = {
                     "position_error": float(np.hypot(r[0], r[1])),
                     "vz": float(-v[2]),
                     "vh": float(np.hypot(v[0], v[1])),
+                    "slope_deg": slope,
                 }
                 break
             self.r, self.v, self.m = r, v, max(m, c.m_min)
+            self.min_clearance = min(self.min_clearance, clearance)
             self.t += c.physics_dt
             self.min_glide_margin_deg = min(self.min_glide_margin_deg, self.glide_angle_margin_deg(r))
             margin = self.glide_slope_margin(r)
@@ -359,11 +448,14 @@ def outcome(env: gym.Env, terminated: bool, truncated: bool) -> str:
 
 def metrics(env: gym.Env, observations: list, actions: list) -> dict[str, float]:
     u = env.unwrapped
-    td = u.touchdown or {"position_error": math.nan, "vz": math.nan, "vh": math.nan}
+    td = u.touchdown or {"position_error": math.nan, "vz": math.nan, "vh": math.nan, "slope_deg": math.nan}
     return {
         "position_error_m": td["position_error"],
         "touchdown_vz_ms": td["vz"],
         "touchdown_vh_ms": td["vh"],
+        "touchdown_slope_deg": td["slope_deg"],
+        # touchdown height relative to the target's ground (far below/above 0: came down somewhere else)
+        "touchdown_height_m": float(u.r[2]) if u.touchdown else math.nan,
         "propellant_used_kg": u.cfg.m0 - u.m,
         # closest approach to the glide-slope cone outside the landing zone (inf if never outside)
         "min_glide_margin_deg": u.min_glide_margin_deg,

@@ -1,0 +1,63 @@
+{
+ "site": "Apollo 17 landing site, Taurus-Littrow valley",
+ "frame": "metres; x east, y north; origin = the historic LM; heights = DTM elevation (m, relative to 1737.4 km)",
+ "landmark": {
+  "xy": [
+   0.0,
+   0.0
+  ],
+  "label": "Apollo 17 LM Challenger \u00b7 11 Dec 1972"
+ },
+ "default_target": [
+  0.0,
+  -25.0
+ ],
+ "far": {
+  "file": "far.jpg",
+  "rect": [
+   -5004.440360181034,
+   -4992.703743927777,
+   4995.559639818966,
+   5007.296256072223
+  ],
+  "m_per_px": 5.0
+ },
+ "near": {
+  "file": "near.jpg",
+  "rect": [
+   -2458.7635866338387,
+   -2455.9723920421206,
+   2456.436413366161,
+   2459.227607957879
+  ],
+  "m_per_px": 1.2
+ },
+ "height": {
+  "file": "height.png",
+  "rect": [
+   -5004.440360181034,
+   -4992.703743927777,
+   4995.559639818966,
+   5007.296256072223
+  ],
+  "m_per_px": 5.0,
+  "z0": -2934.0,
+  "dz": 0.1
+ },
+ "sun": {
+  "azimuth_deg_from_east_ccw": 190.0,
+  "elevation_deg": 17.0,
+  "fit_correlation": 0.765
+ },
+ "earth_az_el": [
+  210.1,
+  53.7
+ ],
+ "mean_brightness": 0.2905258705882353,
+ "sources": [
+  "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/NAC_DTM/APOLLO17/NAC_DTM_APOLLO17.TIF",
+  "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/NAC_DTM/APOLLO17/NAC_DTM_APOLLO17_MOSAIC_120CM.IMG",
+  "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/NAC_DTM/APOLLO17/NAC_DTM_APOLLO17_MOSAIC_5M.IMG"
+ ],
+ "credit": "NASA/GSFC/Arizona State University (LROC). Public domain."
+}

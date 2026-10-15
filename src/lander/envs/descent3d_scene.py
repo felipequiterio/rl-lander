@@ -54,6 +54,7 @@ BANNERS = {  # outcome -> (title, subtitle, tone)
     "landed on target": ("TOUCHDOWN", "on target", "good"),
     "landed off target": ("OFF TARGET", "soft landing outside the 10 m zone", "warn"),
     "crashed": ("CRASH", "touchdown too fast", "bad"),
+    "tipped over": ("TIPPED OVER", "soft touchdown on ground steeper than 12\u00b0", "bad"),
     "glide-slope violation": ("GLIDE SLOPE", "dropped below the approach cone", "bad"),
     "out of propellant": ("OUT OF PROPELLANT", "tanks dry while airborne", "bad"),
     "timeout": ("TIMEOUT", "still airborne at the time limit", "warn"),
@@ -142,7 +143,8 @@ class Descent3DScene:
 
     def outcome_sound(self, label: str) -> str | None:
         base = label.removesuffix(" after glide-slope violation")
-        return {"landed on target": "success", "landed off target": "touchdown", "crashed": "explosion"}.get(base, "fail")
+        return {"landed on target": "success", "landed off target": "touchdown", "crashed": "explosion",
+                "tipped over": "touchdown"}.get(base, "fail")
 
     def sound_levels(self, env) -> tuple[dict[str, float], float]:
         st = self._state()
@@ -154,7 +156,8 @@ class Descent3DScene:
     def gauges(self, env) -> list[Gauge]:
         u, st, c = env.unwrapped, self._state(), self.cfg
         r, v, T = st["r"], st["v"], st["thrust"]
-        alt, dist = max(r[2], 0.0), float(np.hypot(r[0], r[1]))
+        # on uneven terrain, what a radar altimeter reads: the height above the ground below
+        alt, dist = max(r[2] - u.ground_height(r[0], r[1]), 0.0), float(np.hypot(r[0], r[1]))
         vz, vh = v[2], float(np.hypot(v[0], v[1]))
         tmag = float(np.linalg.norm(T))
         tilt = math.degrees(math.acos(T[2] / tmag)) if tmag > 0 else 0.0
@@ -162,7 +165,7 @@ class Descent3DScene:
         margin = u.glide_angle_margin_deg(r)
         low = alt < 60
         return [
-            Gauge("altitude", f"{alt:7.1f} m"),
+            Gauge("radar alt" if u.site is not None else "altitude", f"{alt:7.1f} m"),
             Gauge("vert speed", f"{vz:+6.1f} m/s",
                   tone=("good" if -vz <= c.max_touchdown_vz else "warn" if -vz <= 2 * c.max_touchdown_vz else "bad") if low else "normal"),
             Gauge("horiz speed", f"{vh:5.1f} m/s", tone=("good" if vh <= c.max_touchdown_vh else "warn") if low else "normal"),

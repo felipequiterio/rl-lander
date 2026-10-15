@@ -12,6 +12,10 @@ where it thrusts).
 
 Cameras (press C to cycle): chase (behind the lander along its approach), side,
 ground (standing at the landing zone, zooming to keep the lander framed) and orbit.
+
+Ground: the real Apollo 11 site's imagery by default (``--terrain procedural`` for
+generated craters). When the env flies over real terrain (descent3d's ``terrain``
+option) the scene shows that site, in 3D, around each episode's target.
 """
 
 from __future__ import annotations
@@ -73,6 +77,8 @@ class Descent3DScene3D(Descent3DScene):
         self.key_bindings = {pygame.K_c: self.next_camera}
         self.label_font = pygame.font.SysFont("ubuntu,segoeui,dejavusans,arial", 14)
         self.rng3 = random.Random(9)
+        self.ground = lambda x, y: 0.0  # the env's ground height (env frame), set per episode
+        self.gz = 0.0  # ground height under the lander
 
     def next_camera(self) -> None:
         self.camera = (self.camera + 1) % len(CAMERAS)
@@ -82,11 +88,23 @@ class Descent3DScene3D(Descent3DScene):
 
     def reset(self, env) -> None:
         super().reset(env)
-        c = env.unwrapped.cfg
+        u = env.unwrapped
+        c = u.cfg
         self.renderer.zone_radius = c.landing_radius
         self.renderer.tan_gs = math.tan(math.radians(c.glide_slope_deg)) if c.glide_slope_deg else None
+        self.ground = u.ground_height
+        self.gz = self.ground(u.r[0], u.r[1])
+        if u.site is not None:  # uneven terrain: the env's site, in relief, around this episode's target
+            if self.site is None or self.site["name"] != u.site.name:
+                self.site = load_site(u.site.name)
+                self.renderer.set_site(self.site)
+                print(f"terrain: {self.site['meta']['site']} (3D relief)", flush=True)
+            self.renderer.set_origin(u.target_site, u.relief)
+        else:
+            self.renderer.set_origin()
         self.p3: list[list] = []  # particles: [pos(3), vel(3), age, life, kind, size]
-        self.trail3 = [env.unwrapped.r.copy()]
+        self.trail3 = [u.r.copy()]
+        self.track3 = [self._on_ground(u.r)]
         self.cam_eye = None
         self.flash3 = 0.0
         self.wreck = None
@@ -99,9 +117,11 @@ class Descent3DScene3D(Descent3DScene):
         if u.t != self.cur["t"]:
             self.prev, self.cur = self.cur, self._snapshot(u)
             self.trail3.append(u.r.copy())
+            self.track3.append(self._on_ground(u.r))
             self.trail.append(u.r.copy())
         self.frac = frac
         st = self._state()
+        self.gz = self.ground(st["r"][0], st["r"][1])
         k = 1 - math.exp(-dt * 2.5)
         self.inset_half *= (self._inset_target(st) / self.inset_half) ** k
         if action is not None and not self.dead:
@@ -110,8 +130,18 @@ class Descent3DScene3D(Descent3DScene):
         self.flash3 = max(0.0, self.flash3 - dt * 1.2)
         self._update_camera(st, dt)
 
+    def _on_ground(self, r: np.ndarray) -> list[float]:
+        return [r[0], r[1], self.ground(r[0], r[1]) + 0.08]
+
     def on_outcome(self, env, label: str) -> None:
-        if label.startswith("crashed"):
+        if label.startswith("tipped over"):  # came down softly on a slope and fell downhill
+            self.dead = True
+            u = env.unwrapped
+            x, y, R = u.r[0], u.r[1], u.cfg.footprint_radius
+            down = -np.array([self.ground(x + R, y) - self.ground(x - R, y), self.ground(x, y + R) - self.ground(x, y - R), 0.0])
+            tip = normalize(down) if np.linalg.norm(down) > 1e-6 else np.array([1.0, 0.0, 0.0])
+            self.wreck = rotation_z_to(np.array([0, 0, 1.0]) + tip * math.tan(math.radians(70))), np.array([0, 0, -0.5])
+        elif label.startswith("crashed"):
             self.dead = True
             st = self._state()
             # The wreck: tipped over and half-buried, falling towards its horizontal motion.
@@ -136,11 +166,13 @@ class Descent3DScene3D(Descent3DScene):
         canvas.blit(label, (16, self.size[1] - 30))
 
     def _draw_site_label(self, canvas) -> None:
-        """Tag the real Apollo 11 descent stage (visible in the orthophoto) when the camera is near."""
-        if not self.site or "apollo11_lm" not in self.site["meta"]:
+        """Tag the historic descent stage (visible in the orthophoto) when the camera is near."""
+        if not self.site or "landmark" not in self.site["meta"]:
             return
-        x, y = self.site["meta"]["apollo11_lm"]
-        p = np.array([x, y, 0.3, 1.0])
+        mark = self.site["meta"]["landmark"]
+        ox, oy, _ = self.renderer.origin
+        x, y = mark["xy"][0] - ox, mark["xy"][1] - oy  # site frame -> env frame
+        p = np.array([x, y, self.ground(x, y) + 0.3, 1.0])
         if np.linalg.norm(self.cam_eye - p[:3]) > 600:
             return
         c = self.renderer.last_vp @ p
@@ -151,7 +183,7 @@ class Descent3DScene3D(Descent3DScene):
             return
         pygame.draw.line(canvas, (230, 230, 235), (sx, sy), (sx + 18, sy - 26), 1)
         pygame.draw.circle(canvas, (230, 230, 235), (int(sx), int(sy)), 3, 1)
-        img = self.label_font.render("Apollo 11 LM \u00b7 20 July 1969", True, (235, 235, 240))
+        img = self.label_font.render(mark["label"], True, (235, 235, 240))
         canvas.blit(img, (sx + 21, sy - 36))
 
     # --- pose, camera ------------------------------------------------------------------
@@ -164,7 +196,7 @@ class Descent3DScene3D(Descent3DScene):
 
     def _update_camera(self, st: dict, dt: float) -> None:
         r = st["r"]
-        alt = max(r[2], 0.0)
+        alt = max(r[2] - self.gz, 0.0)
         centre = r + np.array([0, 0, 3.0])
         mode = CAMERAS[self.camera]
         to_target = -np.array([r[0], r[1], 0.0])
@@ -182,7 +214,8 @@ class Descent3DScene3D(Descent3DScene):
         elif mode == "ground":
             # Stand on the sun side of the target, so the lander is front-lit as it comes down.
             sun_h = normalize(np.array([self.renderer.sun[0], self.renderer.sun[1], 0.0]))
-            eye = sun_h * 55.0 + np.array([0, 0, 7.0])
+            eye = sun_h * 55.0
+            eye = eye + np.array([0, 0, self.ground(eye[0], eye[1]) + 7.0])
             look = centre
             rng = np.linalg.norm(centre - eye)
             fov = float(np.clip(math.degrees(2 * math.atan(14.0 / rng)), 2.0, 55.0))  # zoom lens: keep the LM framed
@@ -190,7 +223,7 @@ class Descent3DScene3D(Descent3DScene):
             ang = self.t * 0.12
             eye = centre + 30 * np.array([math.cos(ang), math.sin(ang), 0]) + np.array([0, 0, 9.0])
             look = centre
-        eye[2] = max(eye[2], 1.2)  # never below the surface
+        eye[2] = max(eye[2], self.ground(eye[0], eye[1]) + 1.2)  # never below the surface
         if self.cam_eye is None:
             self.cam_eye, self.cam_look, self.cam_fov = eye, look, fov
         else:
@@ -215,14 +248,14 @@ class Descent3DScene3D(Descent3DScene):
             jitter = np.array([rng.gauss(0, 0.12), rng.gauss(0, 0.12), rng.gauss(0, 0.12)])
             self.p3.append([*(exit_pt + jitter * 0.5), *(v + (down + jitter) * spd), 0.0, rng.uniform(0.08, 0.2), 0, rng.uniform(0.1, 0.22)])
         # Dust where the exhaust meets the ground: in vacuum it flies off in long, flat ballistic arcs.
-        h = exit_pt[2]
+        h = exit_pt[2] - self.gz
         if down[2] < -0.3 and h < 30:
             hit = exit_pt + down * (h / -down[2])
             k = (1 - h / 30) * (0.3 + 0.7 * thr)
             for _ in range(int(12 * k + rng.random())):
                 a = rng.uniform(0, 2 * math.pi)
                 spd = rng.uniform(8, 30) * (0.4 + k)
-                self.p3.append([hit[0] + rng.gauss(0, 1), hit[1] + rng.gauss(0, 1), 0.05,
+                self.p3.append([hit[0] + rng.gauss(0, 1), hit[1] + rng.gauss(0, 1), self.gz + 0.05,
                                 math.cos(a) * spd, math.sin(a) * spd, rng.uniform(0.3, 2.5) * k, 0.0, rng.uniform(1.0, 2.5), 1, rng.uniform(0.6, 1.6)])
 
     def _explode3(self, r: np.ndarray) -> None:
@@ -238,9 +271,10 @@ class Descent3DScene3D(Descent3DScene):
         for _ in range(90):  # dust ring
             a = rng.uniform(0, 2 * math.pi)
             spd = rng.uniform(5, 25)
-            self.p3.append([c[0], c[1], 0.1, math.cos(a) * spd, math.sin(a) * spd, rng.uniform(0.5, 4.0), 0.0, rng.uniform(1.5, 3.0), 1, rng.uniform(1.0, 2.5)])
+            self.p3.append([c[0], c[1], self.gz + 0.1, math.cos(a) * spd, math.sin(a) * spd, rng.uniform(0.5, 4.0), 0.0, rng.uniform(1.5, 3.0), 1, rng.uniform(1.0, 2.5)])
 
     def _step3(self, dt: float) -> None:
+        floor = self.gz + 0.05  # particles stay near the lander: the ground there is close enough to level
         alive = []
         for p in self.p3:
             p[6] += dt
@@ -251,8 +285,8 @@ class Descent3DScene3D(Descent3DScene):
             p[0] += p[3] * dt
             p[1] += p[4] * dt
             p[2] += p[5] * dt
-            if p[2] < 0.05:
-                p[2] = 0.05
+            if p[2] < floor:
+                p[2] = floor
                 if p[8] == 0:  # exhaust hitting the ground fans out
                     h = math.hypot(p[3], p[4]) or 1.0
                     spd = abs(p[5]) * 0.8 + h
@@ -286,13 +320,14 @@ class Descent3DScene3D(Descent3DScene):
         if not self.dead:
             length = (3.0 + 9.0 * thr) * self.rng3.uniform(0.9, 1.1)
             if down[2] < -0.05:
-                length = min(length, exit_pt[2] / -down[2])  # don't draw the plume into the ground
+                length = min(length, (exit_pt[2] - self.gz) / -down[2])  # don't draw the plume into the ground
             if length > 0.2:
                 plume_model = M @ model_matrix(self.model.engine_exit, np.eye(3)) @ np.diag([1.0 + 0.5 * thr, 1.0 + 0.5 * thr, length, 1.0])
                 plume_k = 0.25 + 0.55 * thr
             glow.append((*exit_pt, 1.6 + 1.6 * thr, 1.0, 0.55, 0.22, 0.9))
-            if exit_pt[2] < 40:
-                ground_glow = (exit_pt[0], exit_pt[1], 0.0, (1 - exit_pt[2] / 40) * (0.25 + 0.5 * thr))
+            h = exit_pt[2] - self.gz
+            if h < 40:
+                ground_glow = (exit_pt[0], exit_pt[1], self.gz, (1 - h / 40) * (0.25 + 0.5 * thr))
         # zone beacons: blink red; steady green after a landing on target
         R0 = self.cfg.landing_radius
         for i in range(4):
@@ -301,14 +336,15 @@ class Descent3DScene3D(Descent3DScene):
                 col, k = (0.3, 1.0, 0.5), 0.9
             else:
                 col, k = (1.0, 0.28, 0.2), 1.0 if (self.t + 0.25 * i) % 1.0 < 0.15 else 0.12
-            glow.append((R0 * math.cos(a), R0 * math.sin(a), 1.0, 0.7, *col, k))
+            bx, by = R0 * math.cos(a), R0 * math.sin(a)
+            glow.append((bx, by, self.ground(bx, by) + 1.0, 0.7, *col, k))
         if self.flash3 > 0:
             glow.append((*self.flash_pos3, 14.0 * (0.5 + self.flash3), 1.0, 0.65, 0.35, 0.6 * self.flash3**2))
         alt = max(st["r"][2], 0.0)
         return Frame(
             eye=self.cam_eye, look=self.cam_look, fov=self.cam_fov, lander_model=M, charred=self.dead,
             plume_model=plume_model, plume_intensity=plume_k, glow=glow, soft=soft,
-            trail=np.array(self.trail3 + [st["r"]]),
+            trail=np.array(self.trail3 + [st["r"]]), track=np.array(self.track3 + [self._on_ground(st["r"])]), ground_z=self.gz,
             cone_height=float(np.clip(alt * 1.2, 15.0, 60.0)), limit_ring=alt if alt > 0.5 else None,
             zone_color=(0.3, 1.0, 0.5) if self.pad_ok else (0.95, 0.75, 0.2), ground_glow=ground_glow,
         )

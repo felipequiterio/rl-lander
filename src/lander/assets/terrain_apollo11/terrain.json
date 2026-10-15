@@ -1,13 +1,24 @@
 {
  "site": "Apollo 11 landing site (Tranquility Base), Mare Tranquillitatis",
- "frame": "metres; x east, y north; origin = the env's landing target",
+ "frame": "metres; x east, y north; origin = the historic LM; heights = DTM elevation (m, relative to 1737.4 km)",
+ "landmark": {
+  "xy": [
+   0.0,
+   0.0
+  ],
+  "label": "Apollo 11 LM \u00b7 20 July 1969"
+ },
+ "default_target": [
+  0.0,
+  -25.0
+ ],
  "far": {
   "file": "far.jpg",
   "rect": [
    -3057.0760052148253,
-   -2574.2899219449646,
+   -2599.2899219449646,
    1162.9239947851747,
-   2625.7100780550354
+   2600.7100780550354
   ],
   "m_per_px": 2.0
  },
@@ -21,16 +32,28 @@
   ],
   "m_per_px": 0.5
  },
- "apollo11_lm": [
-  -0.0,
-  25.0
- ],
- "sun": {
-  "azimuth_deg_from_east_ccw": 180.0,
-  "elevation_deg": 17.0,
-  "fit_correlation": 0.714
+ "height": {
+  "file": "height.png",
+  "rect": [
+   -3058.0760067803785,
+   -2598.7899219382234,
+   1161.9239932196215,
+   2601.2100780617766
+  ],
+  "m_per_px": 4.0,
+  "z0": -1974.0,
+  "dz": 0.1
  },
- "mean_brightness": 0.5139357781391835,
+ "sun": {
+  "azimuth_deg_from_east_ccw": 178.0,
+  "elevation_deg": 24.0,
+  "fit_correlation": 0.722
+ },
+ "earth_az_el": [
+  181.6,
+  66.5
+ ],
+ "mean_brightness": 0.5069520776593539,
  "sources": [
   "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/NAC_DTM/APOLLO11/NAC_DTM_APOLLO11.TIF",
   "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/NAC_DTM/APOLLO11/NAC_DTM_APOLLO11_M150361817_50CM.IMG"

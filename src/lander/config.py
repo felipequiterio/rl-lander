@@ -29,6 +29,26 @@ DEFAULTS: dict[str, Any] = {
 _FLOAT_KEYS = {"learning_rate", "ent_coef", "vf_coef", "max_grad_norm", "gamma", "gae_lambda", "clip_range"}
 
 
+def parse_env_args(items: list[str]) -> dict[str, Any]:
+    """``KEY=VALUE`` strings (``--env-arg``) -> env kwargs; values are parsed as YAML
+    (``terrain=apollo11``, ``propellant=800``, ``terrain=[apollo11, apollo17]``)."""
+    out = {}
+    for item in items:
+        key, sep, value = item.partition("=")
+        if not sep or not key:
+            raise ValueError(f"--env-arg {item!r}: expected KEY=VALUE")
+        out[key.strip()] = yaml.safe_load(value)
+    return out
+
+
+def with_env_args(record: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    """A copy of a champion/checkpoint record whose env kwargs are updated with ``overrides``."""
+    if not overrides:
+        return record
+    env = record["env"]
+    return {**record, "env": {**env, "kwargs": {**env.get("kwargs", {}), **overrides}}}
+
+
 def load_config(path: str | Path) -> dict[str, Any]:
     with open(path) as f:
         user = yaml.safe_load(f) or {}
