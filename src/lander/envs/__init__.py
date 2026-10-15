@@ -26,6 +26,10 @@ class EnvSpec:
     outcome: Callable[[gym.Env, bool, bool], str]
     # Mean eval reward at which the task counts as "solved" (None = no threshold).
     solved_threshold: float | None = None
+    # Optional custom renderer for the viewer: scene() -> object with the methods
+    # of lander.envs.lunar_lander_scene.LunarScene (reset/update/draw/gauges/...).
+    # Without one, the viewer shows the env's own rgb_array frames.
+    scene: Callable[[], Any] | None = None
 
 
 REGISTRY: dict[str, EnvSpec] = {
@@ -33,6 +37,7 @@ REGISTRY: dict[str, EnvSpec] = {
         make=lunar_lander.make,
         outcome=lunar_lander.outcome,
         solved_threshold=lunar_lander.SOLVED_THRESHOLD,
+        scene=lunar_lander.scene,
     ),
 }
 

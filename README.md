@@ -8,13 +8,19 @@ viewer window continuously flies the best model found so far and swaps in better
 ones as training produces them. Later phases plug a custom 3DOF powered-descent env
 into the same training/eval/viewer code.
 
+![Viewer: the champion policy on final approach](docs/viewer.jpg)
+
 ```
 configs/ppo_lunar.yaml      run config: env, seed, PPO hyperparameters (annotated)
-src/lander/envs/            env registry: config name -> constructor + outcome classifier
+src/lander/envs/            env registry: config name -> constructor, outcome classifier, scene
+src/lander/envs/lunar_lander_scene.py   the viewer's LunarLander renderer (lander, terrain, effects)
 src/lander/train.py         one headless training run          (lander-train)
 src/lander/launch.py        N runs as parallel processes        (lander-launch)
 src/lander/champion.py      per-run best + global champion, atomic writes
 src/lander/viewer.py        live viewer, hot-reloads champion   (lander-viewer)
+src/lander/hud.py           viewer overlay: model card, telemetry, banners (env-agnostic)
+src/lander/sound.py         procedural sound effects for the viewer
+Makefile                    shortcuts: `make help`
 runs/                       outputs (gitignored)
 ```
 
@@ -52,8 +58,18 @@ uv run lander-viewer
 
 ## Usage
 
-All commands are run from the repo root. Prefix them with `uv run`, or activate
-`.venv` first.
+The quickest route is the Makefile. Run `make help` to list targets; override variables
+inline, e.g. `make launch SEEDS="0 1"` or `make replay MODEL=runs/<run>/best/step_000420000.zip`.
+
+```bash
+make setup         # uv sync
+make launch        # 4 seeds in parallel (SEEDS="0 1 2 3")
+make viewer        # in a second terminal
+make tensorboard   # in a third
+```
+
+The underlying commands, run from the repo root (prefix with `uv run`, or activate
+`.venv` first):
 
 ```bash
 # One run (~3 min for 1M steps)
@@ -66,7 +82,9 @@ uv run lander-launch configs/ppo_lunar.yaml --seeds 0 1 2 3
 # Viewer (separate terminal). Start it before, during or after training.
 uv run lander-viewer
 uv run lander-viewer --model runs/<run>/best/step_000420000.zip   # replay one checkpoint
-uv run lander-viewer --fps 150 --scale 1.5                        # faster / bigger
+uv run lander-viewer --fps 150 --scale 0.8                        # faster / smaller window
+uv run lander-viewer --plain                                      # the env's own basic rendering
+uv run lander-viewer --mute                                       # start silent (M toggles sound)
 
 # TensorBoard: one curve per run; open http://localhost:6006 in your Windows browser
 uv run tensorboard --logdir runs
@@ -81,12 +99,34 @@ comparable), use another directory: `--runs-dir runs/exp2` on both launcher and 
 
 ### What the viewer shows
 
-The overlay shows the model's run, training step and eval score (mean ± std over
-the eval episodes), plus the current episode's reward. After each episode it shows the
-outcome: `landed on pad`, `landed off pad`, `crashed`, `flew off-screen` or
-`timeout (hovering)`. The console prints a running tally of outcomes. When a new
-champion appears mid-episode, the overlay says so; the swap happens after the
-episode ends. Close the window or press `q`/`Esc` to quit.
+- **Scene:** a custom renderer draws the lander, terrain and landing pad from the
+  live physics state, so the picture is exactly what the policy experiences.
+  - The legs move on their sprung joints, and the pad beacons blink red, turning
+    green after a landing on the pad.
+  - The main-engine plume scales with throttle, the side RCS jets fire on the side
+    actually firing, and engine dust sprays off the ground near the surface.
+  - A crash ends in an explosion and a scorched wreck.
+- **Model card** (top left): the run, training step and eval score (mean ± std over
+  the eval episodes). When a better champion appears mid-episode, the card says so,
+  and a toast confirms the swap after the episode ends.
+- **Telemetry** (top right): altitude, vertical/horizontal speed and tilt, coloured
+  green, amber or red near the ground; main-engine throttle, side-thruster state and
+  leg contact. Values are in the simulator's world units.
+- **Episode strip** (bottom): episode number, sim time, running reward, and a tally
+  of outcomes so far.
+- **Outcome banner** after each episode: `TOUCHDOWN` (on or off the pad), `CRASH`,
+  `LOST` (flew off-screen) or `TIMEOUT` (still hovering after 1000 steps).
+- **Sound:** an engine rumble that follows the throttle, a hiss from the side
+  thrusters, a touchdown thud (with a chime for an on-pad landing), an explosion on a
+  crash, a falling tone when the lander is lost, and a chime when a new champion
+  loads. Sounds are panned to the lander's position. Press `M` to toggle;
+  `--mute` starts silent, and `--volume 0..1` sets the level. Everything is
+  synthesised with numpy at startup (`src/lander/sound.py`), so there are no audio
+  files. Without an audio device the viewer just runs silent. Under WSL2, sound goes
+  to Windows through WSLg automatically.
+
+The window is resizable and the picture scales to fit. Close it or press `q`/`Esc`
+to quit. The console also logs each load and each episode's outcome.
 
 ### Outputs
 
@@ -179,10 +219,15 @@ Switch to `subproc` if a future env has an expensive `step()`.
   interleave.
 - **Viewer reloads between episodes only.** It polls `champion.json` every 2 s. A
   failed load is retried, and the previous model keeps flying meanwhile.
-- **Viewer renders `rgb_array` frames into its own window** instead of using the
-  env's `render_mode="human"`. That's what allows the overlay, and a new env only
-  needs to implement `rgb_array` rendering.
+- **The viewer draws into its own window** instead of using the env's
+  `render_mode="human"`. Each env can register a *scene* (`EnvSpec.scene`) that draws
+  from its physics state. Envs without one fall back to their own `rgb_array` frames.
+  The HUD on top is env-agnostic; scenes feed it telemetry as a list of `Gauge`s.
+  The scene is purely visual and never affects the simulation.
 - **Adding an env (Phase 2):** write `src/lander/envs/<name>.py` with
   `make(render_mode=None, **kwargs)` and `outcome(env, terminated, truncated)`, add
   an `EnvSpec` to `REGISTRY` in `src/lander/envs/__init__.py`, and set `env.name` in
-  a config. Training, eval, champion tracking and the viewer need no changes.
+  a config. Training, eval, champion tracking and the viewer need no changes. A
+  custom scene is optional: copy the method set of `LunarScene` (`reset`, `update`,
+  `on_outcome`, `draw`, `gauges`, `banner`, `outcome_tone`, and for sound
+  `sound_levels`, `outcome_sound`).

@@ -22,6 +22,13 @@ def make(render_mode: str | None = None, continuous: bool = True, **kwargs) -> g
     return gym.make("LunarLander-v3", continuous=continuous, render_mode=render_mode, **kwargs)
 
 
+def scene():
+    # Imported lazily: only the viewer needs pygame drawing code.
+    from lander.envs.lunar_lander_scene import LunarScene
+
+    return LunarScene()
+
+
 def outcome(env: gym.Env, terminated: bool, truncated: bool) -> str:
     """Mirror the termination logic in LunarLander.step()."""
     if not (terminated or truncated):

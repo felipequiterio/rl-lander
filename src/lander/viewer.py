@@ -3,9 +3,10 @@
     lander-viewer                      # follow runs/champion.json, hot-reloading
     lander-viewer --model runs/<run>/best/step_000420000.zip
 
-The viewer renders frames itself (env render_mode="rgb_array") and draws them in
-its own pygame window, so it can add a text overlay. A new env only needs to
-support rgb_array rendering to work here.
+Drawing is done by the env's "scene" (see EnvSpec.scene): for LunarLander a
+custom renderer that reads the physics state and draws the lander, terrain,
+flames and dust. Envs without a scene fall back to their own rgb_array frames.
+On top sits an env-agnostic HUD (lander.hud).
 
 Champion changes are picked up between episodes, never mid-episode. Start the
 viewer before, during or after training: with no champion yet it waits.
@@ -14,67 +15,101 @@ viewer before, during or after training: with no champion yet it waits.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 from pathlib import Path
 from typing import Any
 
-import numpy as np
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+
 import pygame
 import yaml
 
 from lander.champion import CHAMPION_FILE, read_json, resolve_model_path
 from lander.config import ALGOS
 from lander.envs import get_spec, make_env
+from lander.hud import Hud
+from lander.sound import SoundFx
 
 POLL_SECONDS = 2.0
-OUTCOME_PAUSE_SECONDS = 1.5
+OUTCOME_PAUSE_SECONDS = 2.2
 
 
-class Window:
+class Display:
+    """Window plus a fixed-size canvas; the canvas is letterboxed into the
+    (resizable) window, so scenes draw at one resolution regardless of window size."""
+
     def __init__(self, fps: int, scale: float):
         pygame.init()
         pygame.display.set_caption("lander viewer")
         self.fps, self.scale = fps, scale
-        self.screen: pygame.Surface | None = None  # opened on the first frame, sized to it
+        self.canvas = pygame.Surface((1200, 800))
+        self.window: pygame.Surface | None = None
         self.clock = pygame.time.Clock()
-        self.font = pygame.font.SysFont("monospace", 15)
         self.closed = False
+        self.on_key: dict[int, Any] = {}  # extra key bindings: key -> callback
 
-    def pump(self) -> None:
+    def use_canvas(self, size: tuple[int, int]) -> pygame.Surface:
+        if self.canvas.get_size() != tuple(size):
+            self.canvas = pygame.Surface(size)
+        return self.canvas
+
+    def present(self) -> None:
         for event in pygame.event.get():
             if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key in (pygame.K_ESCAPE, pygame.K_q)):
                 self.closed = True
-
-    def show(self, frame: np.ndarray | None, lines: list[str], tick: bool = True) -> None:
-        self.pump()
-        if frame is not None:
-            surf = pygame.surfarray.make_surface(frame.swapaxes(0, 1))
+            elif event.type == pygame.KEYDOWN and event.key in self.on_key:
+                self.on_key[event.key]()
+        cw, ch = self.canvas.get_size()
+        if self.window is None:
+            self.window = pygame.display.set_mode((int(cw * self.scale), int(ch * self.scale)), pygame.RESIZABLE)
+        ww, wh = self.window.get_size()
+        if (ww, wh) == (cw, ch):
+            self.window.blit(self.canvas, (0, 0))
         else:
-            surf = pygame.Surface((600, 400))
-            surf.fill((20, 20, 30))
-        if self.screen is None:
-            w, h = surf.get_size()
-            self.screen = pygame.display.set_mode((int(w * self.scale), int(h * self.scale)), pygame.RESIZABLE)
-        # The window may have been resized (by the user or the OS): scale the frame to fit.
-        if surf.get_size() != self.screen.get_size():
-            surf = pygame.transform.smoothscale(surf, self.screen.get_size())
-        self.screen.blit(surf, (0, 0))
-        if lines:
-            rendered = [self.font.render(t, True, (255, 255, 255)) for t in lines]
-            box = pygame.Surface((max(r.get_width() for r in rendered) + 12, 18 * len(rendered) + 8), pygame.SRCALPHA)
-            box.fill((0, 0, 0, 150))
-            self.screen.blit(box, (6, 6))
-            for i, r in enumerate(rendered):
-                self.screen.blit(r, (12, 10 + 18 * i))
+            k = min(ww / cw, wh / ch)
+            size = (max(1, int(cw * k)), max(1, int(ch * k)))
+            self.window.fill((0, 0, 0))
+            self.window.blit(pygame.transform.smoothscale(self.canvas, size), ((ww - size[0]) // 2, (wh - size[1]) // 2))
         pygame.display.flip()
-        if tick:
-            self.clock.tick(self.fps)
+        self.clock.tick(self.fps)
 
-    def wait(self, seconds: float, frame: np.ndarray | None, lines: list[str]) -> None:
-        end = time.monotonic() + seconds
-        while time.monotonic() < end and not self.closed:
-            self.show(frame, lines, tick=False)
-            time.sleep(0.05)
+
+class FrameScene:
+    """Fallback scene for envs without a custom renderer: shows env.render() frames."""
+
+    render_mode = "rgb_array"
+
+    def __init__(self) -> None:
+        self.size = (600, 400)
+
+    def reset(self, env) -> None:
+        h, w = env.render().shape[:2]
+        self.size = (w, h)
+
+    def update(self, env, action, dt) -> None:
+        pass
+
+    def on_outcome(self, env, label) -> None:
+        pass
+
+    def draw(self, canvas, env) -> None:
+        canvas.blit(pygame.surfarray.make_surface(env.render().swapaxes(0, 1)), (0, 0))
+
+    def gauges(self, env) -> list:
+        return []
+
+    def banner(self, label: str) -> tuple[str, str, str]:
+        return label.upper(), "", "normal"
+
+    def outcome_tone(self, label: str) -> str:
+        return "normal"
+
+    def outcome_sound(self, label: str) -> str | None:
+        return None
+
+    def sound_levels(self, env) -> tuple[dict[str, float], float]:
+        return {}, 0.0
 
 
 class ChampionSource:
@@ -138,29 +173,56 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--runs-dir", type=Path, default=Path("runs"))
     p.add_argument("--model", type=Path, help="replay this checkpoint instead of following the champion")
     p.add_argument("--env", help="env registry name for --model when the run's config.yaml can't be found")
-    p.add_argument("--fps", type=int, default=50, help="playback speed (LunarLander runs at 50 steps/s)")
-    p.add_argument("--scale", type=float, default=1.0, help="window scale factor")
+    p.add_argument("--fps", type=int, default=50, help="playback speed (LunarLander simulates 50 steps/s)")
+    p.add_argument("--scale", type=float, default=1.0, help="initial window size relative to the 1200x800 canvas")
+    p.add_argument("--plain", action="store_true", help="use the env's own rendering instead of the custom scene")
+    p.add_argument("--mute", action="store_true", help="start with sound off (toggle any time with M)")
+    p.add_argument("--volume", type=float, default=0.7, help="master volume, 0..1")
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
     p.add_argument("--episodes", type=int, default=0, help="stop after N episodes (0 = forever)")
     args = p.parse_args(argv)
 
     runs_dir = args.runs_dir.resolve()
-    win = Window(args.fps, args.scale)
+    display = Display(args.fps, args.scale)
+    hud = Hud()
+    fx = SoundFx(enabled=not args.mute, volume=args.volume)
+    display.on_key[pygame.K_m] = lambda: hud.show_toast("Sound on" if fx.toggle() else "Sound muted", 1.5)
     source = None if args.model else ChampionSource(runs_dir)
     fixed = record_for_checkpoint(args.model.resolve(), args.env) if args.model else None
+    mode = "replay" if fixed else "champion"
 
-    model, loaded, env, env_key = None, None, None, None
+    model, loaded, env, env_key, scene = None, None, None, None, None
     outcomes: dict[str, int] = {}
     episode = 0
     said_waiting = False
-    while not win.closed and (args.episodes == 0 or episode < args.episodes):
+    t0 = time.monotonic()
+
+    def frame(dt: float, steps: int, ep_reward: float, pending: dict | None, banner=None) -> None:
+        canvas = display.use_canvas(scene.size)
+        scene.draw(canvas, env)
+        card = hud.model_card(canvas, mode, loaded, pending)
+        hud.toast(canvas, card, 1 / args.fps)
+        hud.gauges(canvas, scene.gauges(env))
+        tally = [(name, n, scene.outcome_tone(name)) for name, n in sorted(outcomes.items(), key=lambda kv: -kv[1])]
+        hud.episode_strip(canvas, episode, steps * dt, ep_reward, tally)
+        if banner:
+            hud.banner(canvas, *banner)
+        hud.sound_hint(canvas, fx.enabled, fx.available)
+        levels, pan = scene.sound_levels(env)
+        fx.update(levels, pan)
+        display.present()
+
+    while not display.closed and (args.episodes == 0 or episode < args.episodes):
         # --- Between episodes: (re)load the model if the champion changed. ---
         target = fixed or source.poll(force=True)
         if target is None:
             if not said_waiting:
                 print(f"waiting for {source.path} ...", flush=True)
                 said_waiting = True
-            win.wait(POLL_SECONDS, None, ["waiting for first champion...", str(source.path)])
+            end = time.monotonic() + POLL_SECONDS
+            while time.monotonic() < end and not display.closed:
+                hud.waiting(display.canvas, str(source.path), time.monotonic() - t0)
+                display.present()
             continue
         if loaded is None or target["model_path"] != loaded["model_path"]:
             path = resolve_model_path(target, runs_dir)
@@ -169,45 +231,65 @@ def main(argv: list[str] | None = None) -> None:
             except Exception as e:  # noqa: BLE001 - keep the viewer alive whatever goes wrong
                 print(f"failed to load {path}: {e!r}; retrying", flush=True)
                 if model is None:
-                    win.wait(POLL_SECONDS, None, ["failed to load model, retrying...", str(path)])
+                    end = time.monotonic() + POLL_SECONDS
+                    while time.monotonic() < end and not display.closed:
+                        hud.waiting(display.canvas, f"failed to load {path.name}, retrying", time.monotonic() - t0)
+                        display.present()
                     continue
                 # Keep showing the previous champion; we'll retry after this episode.
             else:
-                verb = "loaded" if loaded is None else "hot-reloaded"
+                if loaded is not None:
+                    hud.show_toast(f"New champion loaded: {target['run_name']}  {target['mean_reward']:.1f}")
+                    fx.play("chime")
+                print(f"{'loaded' if loaded is None else 'hot-reloaded'} {path.name}: " + ", ".join(describe(target)), flush=True)
                 loaded = target
-                print(f"{verb} {path.name}: " + ", ".join(describe(target)), flush=True)
-                if (target["env"]["name"], repr(target["env"]["kwargs"])) != env_key:
+                key = (target["env"]["name"], repr(target["env"]["kwargs"]))
+                if key != env_key:
                     if env is not None:
                         env.close()
-                    env_key = (target["env"]["name"], repr(target["env"]["kwargs"]))
-                    env = make_env(target["env"]["name"], render_mode="rgb_array", **target["env"]["kwargs"])
+                    spec = get_spec(target["env"]["name"])
+                    scene = spec.scene() if spec.scene and not args.plain else FrameScene()
+                    env = make_env(target["env"]["name"], render_mode=scene.render_mode, **target["env"]["kwargs"])
+                    env_key = key
         spec = get_spec(loaded["env"]["name"])
+        dt = 1.0 / env.metadata.get("render_fps", 50)  # simulated seconds per env step
 
         # --- One episode. ---
         episode += 1
         obs, _ = env.reset()
+        scene.reset(env)
         ep_reward, steps, done = 0.0, 0, False
         terminated = truncated = False
-        while not done and not win.closed:
+        while not done and not display.closed:
             action, _ = model.predict(obs, deterministic=not args.stochastic)
             obs, reward, terminated, truncated, _ = env.step(action)
             ep_reward += float(reward)
             steps += 1
             done = terminated or truncated
-            pending = source is not None and (c := source.poll()) is not None and c["model_path"] != loaded["model_path"]
-            lines = describe(loaded) + [f"ep {episode}  step {steps}  reward {ep_reward:7.1f}"]
-            if pending:
-                lines.append(f"new champion ({c['mean_reward']:.1f}) loads next episode")
-            win.show(env.render(), lines)
-        if win.closed:
+            scene.update(env, action, dt)
+            c = source.poll() if source else None
+            frame(dt, steps, ep_reward, c if c and c["model_path"] != loaded["model_path"] else None)
+        if display.closed:
             break
 
         result = spec.outcome(env, terminated, truncated)
         outcomes[result] = outcomes.get(result, 0) + 1
         tally = ", ".join(f"{k}: {v}" for k, v in sorted(outcomes.items()))
         print(f"episode {episode}: {result}, reward {ep_reward:.1f}, {steps} steps   [{tally}]", flush=True)
-        lines = describe(loaded) + [f"ep {episode}: {result.upper()}  reward {ep_reward:.1f}"]
-        win.wait(OUTCOME_PAUSE_SECONDS, env.render(), lines)
+
+        # --- Outcome pause: keep animating (dust settling, explosion) under a banner. ---
+        scene.on_outcome(env, result)
+        fx.play(scene.outcome_sound(result), scene.sound_levels(env)[1])
+        title, subtitle, tone = scene.banner(result)
+        subtitle = f"{subtitle}  \u00b7  reward {ep_reward:.1f}" if subtitle else f"reward {ep_reward:.1f}"
+        n_frames = int(OUTCOME_PAUSE_SECONDS * args.fps)
+        for i in range(n_frames):
+            if display.closed:
+                break
+            scene.update(env, None, dt)
+            fade = min(1.0, i / (0.15 * args.fps), (n_frames - i) / (0.3 * args.fps))
+            c = source.poll() if source else None
+            frame(dt, steps, ep_reward, c if c and c["model_path"] != loaded["model_path"] else None, (title, subtitle, tone, fade))
 
     if env is not None:
         env.close()
