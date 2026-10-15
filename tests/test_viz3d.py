@@ -73,26 +73,35 @@ def test_bundled_lm_loads_at_real_scale():
     assert (BUNDLE_DIR / "ATTRIBUTION.md").exists()
 
 
-def test_lroc_projection_finds_tranquility_base():
-    from lander.viz3d.import_lroc import DTM, LM_LAT, LM_LON, ORTHO, pixel
+def test_lroc_projection_finds_the_apollo_landers():
+    from lander.viz3d.import_lroc import SITES, pixel
 
-    s, line = pixel(ORTHO, LM_LAT, LM_LON)
-    assert abs(s - 6113.7) < 1 and abs(line - 34103.9) < 1  # verified visually: the descent stage is there
-    sd, ld = pixel(DTM, LM_LAT, LM_LON)
-    assert abs(4 * sd - s) < 2 and abs(4 * ld - line) < 2  # the 2 m DTM and 0.5 m orthophoto line up
+    # Verified visually: the descent stages are at these pixels of the orthophotos.
+    for name, (s_px, l_px) in {"apollo11": (6113.7, 34103.9), "apollo17": (20561.5, 28111.9)}.items():
+        site = SITES[name]
+        s, line = pixel(site["near"], *site["lm"], site["center_lat"])
+        assert abs(s - s_px) < 1 and abs(line - l_px) < 1
+        # the terrain model lines up with the photo (within a metre or two)
+        sd, ld = pixel(site["dtm"], *site["lm"], site["center_lat"])
+        k = site["dtm"]["scale"] / site["near"]["scale"]
+        assert abs(k * sd - s) * site["near"]["scale"] < 2.5 and abs(k * ld - line) * site["near"]["scale"] < 2.5
 
 
-def test_apollo11_site_loads():
+@pytest.mark.parametrize("name", ["apollo11", "apollo17"])
+def test_sites_load(name):
     from lander.viz3d.terrain import load_site
 
-    site = load_site("apollo11")
-    assert site is not None, "run `make import-terrain`"
+    site = load_site(name)
+    assert site is not None, f"run `make import-terrain SITE={name}`"
     meta = site["meta"]
-    x0, y0, x1, y1 = meta["near"]["rect"]
-    assert x0 < 0 < x1 and y0 < 0 < y1  # the landing target is inside the 0.5 m image
-    assert site["near"].shape == (2048, 2048) and site["far"].ndim == 2
+    for key in ("near", "far"):
+        x0, y0, x1, y1 = meta[key]["rect"]
+        assert x0 < 0 < x1 and y0 < 0 < y1  # the historic LM (the origin) is on both images
+    hx0, hy0, hx1, hy1 = site["height_rect"]
+    assert site["height"].shape == (round((hy1 - hy0) / meta["height"]["m_per_px"]), round((hx1 - hx0) / meta["height"]["m_per_px"]))
+    assert np.isfinite(site["height"]).all() and -4000 < site["height"].mean() < 0
     assert np.isclose(np.linalg.norm(site["sun_dir"]), 1.0) and 0 < site["sun_dir"][2] < 0.6  # a low sun
-    assert site["sun_dir"][0] < -0.8  # in the west: the photo's shadows point east
+    assert site["sun_dir"][0] < -0.5  # in the west: the photos' shadows point east
     assert load_site("nowhere") is None
 
 
@@ -182,3 +191,26 @@ def test_3d_scene_runs_an_episode(monkeypatch):
     scene.on_outcome(env, "crashed")
     scene.update(env, None, 0.02)
     scene.draw(canvas, env)
+
+
+@needs_gl
+def test_renderer_draws_relief():
+    import pygame
+
+    from lander.envs.ground import Heightmap
+    from lander.viz3d.glmath import model_matrix
+    from lander.viz3d.procedural import procedural_lm
+    from lander.viz3d.renderer import Frame, Renderer
+    from lander.viz3d.terrain import load_site
+
+    pygame.init()
+    r = Renderer(procedural_lm(), size=(320, 200), site=load_site("apollo17"))
+    ground = Heightmap.load("apollo17").height(0.0, 0.0)
+    # From the valley floor, looking north: the North Massif rises well above the horizon.
+    frame = Frame(eye=np.array([0.0, 0.0, 30.0]), look=np.array([0.0, 1000.0, 30.0]), fov=60,
+                  lander_model=model_matrix(np.array([0.0, 50.0, 10.0]), np.eye(3)))
+    r.set_origin((0.0, 0.0, ground), relief=1.0)
+    hills = pygame.surfarray.array3d(r.render(frame))[:, :100].mean()  # upper half: massif or sky
+    r.set_origin((0.0, 0.0, ground), relief=0.0)
+    flat = pygame.surfarray.array3d(r.render(frame))[:, :100].mean()
+    assert hills > flat + 10  # the massif fills sky that is black over flat ground

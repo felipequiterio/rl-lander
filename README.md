@@ -16,11 +16,13 @@ configs/ppo_lunar.yaml      run config: env, seed, PPO hyperparameters (annotate
 src/lander/envs/            env registry: config name -> constructor, outcome classifier, scene
 src/lander/envs/lunar_lander_scene.py   the viewer's LunarLander renderer (lander, terrain, effects)
 src/lander/envs/descent3d.py            Phase 2: 3D point-mass lunar powered descent (G-FOLD problem)
+src/lander/envs/ground.py               real terrain for it: LROC heightmaps, safe-target selection
 src/lander/envs/descent3d_scene3d.py    its 3D viewer scene (default): OpenGL, cameras, effects
 src/lander/envs/descent3d_scene.py      its 2D viewer scene: zooming side view + top-down inset
 src/lander/viz3d/                       3D rendering: moderngl renderer, KSP .mu/.cfg readers, terrain
 src/lander/assets/apollo_lm/            the Apollo LM model (from Bluedog Design Bureau, CC BY-NC-SA 4.0)
-src/lander/assets/terrain_apollo11/     real Apollo 11 site imagery (NASA LROC, public domain)
+src/lander/assets/terrain_apollo11/     real Apollo 11 site: imagery + terrain model (NASA LROC, public domain)
+src/lander/assets/terrain_apollo17/     real Apollo 17 site (Taurus-Littrow valley), same
 src/lander/envs/scene_art.py            art shared by the scenes (sky, Earth, lander sprite, glows)
 src/lander/controllers/     non-learned controllers with the policy API (ZEM/ZEV guidance; G-FOLD next)
 tests/                      pytest suite (`make test`)
@@ -386,24 +388,27 @@ applies to `src/lander/assets/apollo_lm/` only (see its `ATTRIBUTION.md`): those
 are attribution-required, non-commercial, and share-alike. The rest of the repo isn't
 affected, but don't use the bundled model commercially.
 
-**Real terrain: Tranquility Base.** The ground is NASA Lunar Reconnaissance Orbiter
-imagery of the Apollo 11 site, bundled in `src/lander/assets/terrain_apollo11/` (3.5 MB):
+**Real terrain: Tranquility Base.** On flat ground, the ground is NASA Lunar
+Reconnaissance Orbiter imagery of the Apollo 11 site, bundled in
+`src/lander/assets/terrain_apollo11/` (4.1 MB, with its terrain model):
 - **Imagery:** an LROC Narrow Angle Camera orthophoto at **0.5 m/px** within 512 m of the
-  target and 2 m/px over a 4.2 km x 5.2 km area. Beyond that it's tiled, cross-faded so
-  no seams show.
+  historic LM and 2 m/px over a 4.2 km x 5.2 km area. Beyond that it's tiled, cross-faded
+  so no seams show.
 - **Landing target:** 25 m south of the real Apollo 11 descent stage, which you can see
   in the photo (the bright speck with a long shadow). The viewer labels it when the
   camera is within 600 m. Little West crater is just east of it.
 - **Sun:** estimated by fitting the 2 m stereo terrain model's slopes to the photo's
   brightness (a 0.71 correlation), so the 3D lander's lighting and shadow match the
-  baked-in shading. The physics ground stays the flat plane z = 0, so the real relief
-  lives only in the imagery.
-- **Re-importing:** `make import-terrain` re-creates the bundle. It range-downloads only
-  the needed rows of the PDS products NAC_DTM_APOLLO11 and
-  NAC_DTM_APOLLO11_M150361817_50CM (about 200 MB, cached in `~/.cache/lander/lroc`).
+  baked-in shading. In the flat-ground env the physics ground stays the plane z = 0,
+  so there the real relief lives only in the imagery (see the next section for real
+  relief).
+- **Re-importing:** `make import-terrain` re-creates the bundles (`SITE=apollo11` for
+  one). It range-downloads only the needed rows of the PDS products, such as
+  NAC_DTM_APOLLO11 and NAC_DTM_APOLLO11_M150361817_50CM (a few hundred MB per site,
+  cached in `~/.cache/lander/lroc`).
 - **Credit:** NASA/GSFC/Arizona State University. NASA imagery is public domain.
 - `--terrain procedural` (or `LANDER_TERRAIN=procedural`) switches back to the
-  procedural craters.
+  procedural craters, and `--terrain apollo17` shows the Apollo 17 imagery instead.
 
 **Rendering:** moderngl draws offscreen, and the pygame HUD goes on top.
 - **Under WSL2** the viewer selects Mesa's d3d12 driver, so it runs on the Windows GPU
@@ -454,6 +459,49 @@ hover costs about 4.5 kg. Ranking checkpoints by success rate (now the default) 
 problem: saved bests reach 98-100% success. Raising the propellant price on its own
 didn't help (at 0.5 per kg the agent prefers to crash). See the plan for the next
 iteration.
+
+**Landing on real terrain** (`configs/ppo_descent3d_terrain.yaml`). With
+`terrain: apollo17` the ground is no longer flat: it's the LROC terrain model of the
+Apollo 17 site in the Taurus-Littrow valley (5 m posts, 1.4 km of relief within 5 km
+of the LM, in `src/lander/assets/terrain_apollo17/`).
+- **Targets:** each episode lands on a random gentle spot (≤ 6° under the whole zone
+  and the legs) within 2.3 km of the historic LM. The frame stays target-centred.
+- **Physics:** touchdown happens on the real surface. Hitting a hillside is a crash,
+  and a soft touchdown on ground steeper than 12° (the LM's limit) is `tipped over`.
+- **Observations** gain what a real lander measures or knows from its map: a radar
+  altimeter, the terrain profile along the straight line to the target, and predicted
+  clearances 2-20 s ahead along the current velocity.
+- **Curriculum:** the relief grows from flat to real along with the start conditions.
+- **Viewer:** the ground is drawn in 3D relief (the massifs rise behind the landing
+  zone), with 1.2 m/px imagery around every target.
+
+```bash
+make train-terrain          # 4 seeds, ~40 min
+make viewer-terrain         # watch the champion (SITE=apollo11: a site it never trained on)
+make viewer-terrain-zem     # ZEM/ZEV over the same terrain
+make eval-terrain           # both, on 200 fixed episodes
+```
+
+Results over 200 fixed episodes (the best checkpoint of each seed):
+
+| | Apollo 17 (trained) | Apollo 11 (never seen) | propellant |
+|---|---|---|---|
+| ZEM/ZEV (terrain-blind) | 100% | 100% | 352 kg |
+| PPO, best seed | 63.5% | 75% | 543 kg |
+| PPO, seeds 1 and 3 | 53%, 61.5% | | 535 kg |
+| PPO, seed 2 | 0% (dives into the ground) | | |
+
+- **The terrain itself caused no failures.** The three working policies never touched
+  down more than 10 m from the target or on a slope above 5°, and nothing hit a hill.
+  Their failures are the flat-ground ones: dipping below the glide slope before a
+  good landing, and running out of propellant.
+- **Why terrain doesn't bite here:** descents start at least 45° above the target,
+  and the 15° glide slope already keeps every sensible approach far above the hills.
+  Even ZEM/ZEV, which knows nothing about the terrain, lands every time. Real terrain
+  starts to matter with shallow, Apollo-style approaches or when diverting to another
+  spot (the next stage).
+- **Propellant price:** at the flat champion's 0.3 per kg, all 8 terrain seeds settled
+  on free-falling into the ground. At 0.1 three of four learn to land.
 
 **Tests:** `make test` checks the physics against closed forms:
 - free fall

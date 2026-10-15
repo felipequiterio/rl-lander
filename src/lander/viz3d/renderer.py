@@ -8,7 +8,10 @@ that fails) Mesa's software rasteriser still works, just slower.
 What's drawn (all in the env's frame: metres, z up, target at the origin):
 - the lander mesh, lit by a low sun with shadow mapping;
 - the ground: one big flat quad whose shader adds procedural crater relief (normal
-  map), fine detail for close-ups, the landing-zone markings and the lander's shadow;
+  map), fine detail for close-ups, the landing-zone markings and the lander's shadow.
+  With a real site (set_site) it shows the LROC orthophotos instead, and with relief
+  on (set_origin) it becomes a mesh displaced by the site's terrain model: dense
+  around the target, coarser farther out, heights read from a texture on the GPU;
 - the glide-slope cone (translucent), trajectory trail and ground track (lines);
 - billboards: particles (exhaust, dust, explosion), beacons, engine glow, the sun;
 - stars (points) and the Earth (a textured billboard).
@@ -108,10 +111,22 @@ DEPTH_FS = "#version 330\nvoid main() {}\n"
 GROUND_VS = """
 #version 330
 uniform mat4 u_vp; uniform mat4 u_light_vp;
+uniform int u_relief_on; uniform sampler2D u_height; uniform vec4 u_height_rect;
+uniform vec3 u_origin; uniform float u_relief; uniform float u_height_mean;
 in vec2 in_xy;
 out vec3 v_world; out vec4 v_light;
 void main() {
-    vec4 w = vec4(in_xy, 0.0, 1.0);
+    float z = 0.0;
+    if (u_relief_on == 1) {
+        // The env's frame is the site frame shifted to the target (u_origin: its site
+        // position and ground height). Beyond the terrain model, fade to its mean level.
+        vec2 s = in_xy + u_origin.xy;
+        vec2 uv = (s - u_height_rect.xy) / (u_height_rect.zw - u_height_rect.xy);
+        float h = textureLod(u_height, clamp(uv, 0.0, 1.0), 0.0).r;
+        vec2 outside = max(max(u_height_rect.xy - s, s - u_height_rect.zw), 0.0);
+        z = u_relief * (mix(h, u_height_mean, smoothstep(0.0, 1500.0, length(outside))) - u_origin.z);
+    }
+    vec4 w = vec4(in_xy, z, 1.0);
     v_world = w.xyz; v_light = u_light_vp * w;
     gl_Position = u_vp * w;
 }
@@ -123,7 +138,7 @@ uniform sampler2D u_craters; uniform sampler2D u_detail; uniform sampler2DShadow
 uniform vec3 u_sun; uniform vec3 u_eye; uniform float u_extent; uniform float u_detail_tile;
 uniform float u_zone_r; uniform vec3 u_zone_color; uniform vec3 u_glow_pos; uniform float u_glow;
 uniform int u_site; uniform sampler2D u_near; uniform sampler2D u_far;
-uniform vec4 u_near_rect; uniform vec4 u_far_rect; uniform float u_site_gain;
+uniform vec4 u_near_rect; uniform vec4 u_far_rect; uniform float u_site_gain; uniform vec3 u_origin;
 in vec3 v_world; in vec4 v_light;
 out vec4 f_color;
 """ + SHADOW_FN + """
@@ -166,8 +181,9 @@ void main() {
     if (u_site == 1) {
         // Real orthophotos: the shading (and the sun's shadows) is baked in, so they're
         // used as lit colour; only the lander's own shadow and fine detail are added.
-        vec2 fu = (p - u_far_rect.xy) / (u_far_rect.zw - u_far_rect.xy);
-        vec2 nu = (p - u_near_rect.xy) / (u_near_rect.zw - u_near_rect.xy);
+        vec2 ps = p + u_origin.xy;  // site frame, where the images are placed
+        vec2 fu = (ps - u_far_rect.xy) / (u_far_rect.zw - u_far_rect.xy);
+        vec2 nu = (ps - u_near_rect.xy) / (u_near_rect.zw - u_near_rect.xy);
         float wf = 1.0;  // the photo (tiled beyond its edges) covers the whole ground
         float wn = inside(nu, 0.06);
         // Beyond the imported area, tile the real image: two half-offset copies, each
@@ -321,15 +337,14 @@ class Frame:
     limit_ring: float | None = None  # altitude at which to draw the cone's ring (the lander's)
     zone_color: tuple = (0.95, 0.75, 0.2)
     ground_glow: tuple = (0.0, 0.0, 0.0, 0.0)  # x, y, z, intensity
+    track: np.ndarray | None = None  # (n, 3) ground track under the trail (default: the trail at z = 0)
+    ground_z: float = 0.0  # ground height under the lander
 
 
 class Renderer:
     def __init__(self, model: AssembledModel, size=(1200, 800), zone_radius=10.0, glide_slope_deg: float | None = 15.0,
                  site: dict | None = None):
         self.size = size
-        self.site = site
-        self.sun = site["sun_dir"] if site else SUN_DIR  # a real site brings its own sun (fitted to its imagery)
-        self.earth = site["earth_dir"] if site else EARTH_DIR
         self.ctx = ctx = create_context()
         self.gpu = ctx.info.get("GL_RENDERER", "?")
         self.software = "llvmpipe" in self.gpu.lower() or "softpipe" in self.gpu.lower()
@@ -350,11 +365,9 @@ class Renderer:
 
         self._upload_model(model)
         self._make_ground()
-        if site is not None:
-            self.tex_near = self._texture1(site["near"])
-            self.tex_far = self._texture1(site["far"])
-            # match the photo's mean brightness to what the procedural ground shows under the same sun
-            self.site_gain = 0.34 / max(site["meta"].get("mean_brightness", 0.5), 1e-3)
+        self.site, self.site_tex = None, []
+        self.set_site(site)
+        self.set_origin()
         self._make_sky()
         self._make_cone()
         self._make_plume()
@@ -430,8 +443,47 @@ class Renderer:
         R = 25000.0
         xy = np.array([-R, -R, R, -R, -R, R, R, R], "f4")
         self.vao_ground = self.ctx.vertex_array(self.p_ground, [(self.ctx.buffer(xy.tobytes()), "2f", "in_xy")])
+        # For relief: a grid centred on the target, ~2 m between vertices there and
+        # coarser outwards (x = A sinh(k u) / sinh(k)), out to 20 km.
+        n, A, k = 641, 20000.0, 6.0
+        u = np.sinh(k * np.linspace(-1, 1, n)) / math.sinh(k) * A
+        gx, gy = np.meshgrid(u, u)
+        verts = np.stack([gx, gy], -1).astype("f4").reshape(-1, 2)
+        i, j = np.meshgrid(np.arange(n - 1), np.arange(n - 1))
+        a = (j * n + i).ravel()
+        idx = np.stack([a, a + 1, a + n, a + 1, a + n + 1, a + n], 1).astype("u4")
+        self.vao_relief = self.ctx.vertex_array(self.p_ground, [(self.ctx.buffer(verts.tobytes()), "2f", "in_xy")],
+                                                index_buffer=self.ctx.buffer(idx.tobytes()), index_element_size=4)
         self.tex_craters = self._texture(terrain.crater_map(), repeat=True)
         self.tex_detail = self._texture(terrain.detail_map(), repeat=True)
+
+    def set_site(self, site: dict | None) -> None:
+        """Show a real landing site (lander.viz3d.terrain.load_site), or None for the procedural ground."""
+        for tex in self.site_tex:
+            tex.release()
+        self.site, self.site_tex = site, []
+        self.sun = site["sun_dir"] if site else SUN_DIR  # a real site brings its own sun (fitted to its imagery)
+        self.earth = site["earth_dir"] if site else EARTH_DIR
+        if site is None:
+            return
+        self.tex_near = self._texture1(site["near"])
+        self.tex_far = self._texture1(site["far"])
+        h = site["height"]
+        self.tex_height = self.ctx.texture((h.shape[1], h.shape[0]), 1, np.ascontiguousarray(h, "f4").tobytes(), dtype="f4")
+        self.tex_height.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        self.tex_height.repeat_x = self.tex_height.repeat_y = False
+        self.height_mean = float(h.mean())
+        self.site_tex = [self.tex_near, self.tex_far, self.tex_height]
+        # match the photo's mean brightness to what the procedural ground shows under the same sun
+        self.site_gain = 0.34 / max(site["meta"].get("mean_brightness", 0.5), 1e-3)
+
+    def set_origin(self, origin=None, relief: float = 0.0) -> None:
+        """Where the env's frame sits on the site: the target's site position and ground
+        height (default: the site's default target), and the relief scale (0 = flat ground)."""
+        if origin is None:
+            tx, ty = self.site["meta"].get("default_target", (0.0, 0.0)) if self.site else (0.0, 0.0)
+            origin = (tx, ty, 0.0)
+        self.origin, self.relief = tuple(float(v) for v in origin), float(relief)
 
     def _make_sky(self) -> None:
         rng = np.random.default_rng(1)
@@ -494,7 +546,7 @@ class Renderer:
         # Shadow map: an orthographic view from the sun, centred on the lander. The
         # shadow on the ground lies along the same sun ray, so it's always in frame.
         light_eye = lander_pos + self.sun * 60.0
-        alt = max(lander_pos[2], 0.0)
+        alt = max(lander_pos[2] - f.ground_z, 0.0)
         light_vp = ortho(self.model_radius + 6, self.model_radius + 6, 1.0, 60.0 + (alt + 20) / self.sun[2] + 50) @ look_at(light_eye, lander_pos)
         self.shadow_fbo.use()
         self.shadow_fbo.clear(depth=1.0)
@@ -526,16 +578,24 @@ class Renderer:
                      ("u_detail_tile", terrain.DETAIL_TILE), ("u_zone_r", self.zone_radius), ("u_zone_color", f.zone_color),
                      ("u_glow_pos", tuple(f.ground_glow[:3])), ("u_glow", f.ground_glow[3])):
             self._set(g, k, v)
+        relief = self.site is not None and self.relief > 0
         if self.site is not None:
             self.tex_near.use(location=3)
             self.tex_far.use(location=4)
+            self.tex_height.use(location=5)
             meta = self.site["meta"]
             for k, v in (("u_site", 1), ("u_near", 3), ("u_far", 4), ("u_near_rect", tuple(meta["near"]["rect"])),
-                         ("u_far_rect", tuple(meta["far"]["rect"])), ("u_site_gain", self.site_gain)):
+                         ("u_far_rect", tuple(meta["far"]["rect"])), ("u_site_gain", self.site_gain), ("u_origin", self.origin),
+                         ("u_relief_on", 1 if relief else 0), ("u_height", 5), ("u_height_rect", tuple(self.site["height_rect"])),
+                         ("u_relief", self.relief), ("u_height_mean", self.height_mean)):
                 self._set(g, k, v)
         else:
             self._set(g, "u_site", 0)
-        self.vao_ground.render(moderngl.TRIANGLE_STRIP)
+            self._set(g, "u_relief_on", 0)
+        if relief:
+            self.vao_relief.render()
+        else:
+            self.vao_ground.render(moderngl.TRIANGLE_STRIP)
 
         # lander
         m = self.p_mesh
@@ -578,7 +638,8 @@ class Renderer:
             pts = f.trail[-n:]
             alpha = np.linspace(0.15, 0.9, n)
             path = np.concatenate([pts, np.tile([0.47, 0.78, 1.0], (n, 1)), alpha[:, None]], 1)
-            track = np.concatenate([pts * [1, 1, 0] + [0, 0, 0.08], np.tile([0.47, 0.78, 1.0], (n, 1)), alpha[:, None] * 0.4], 1)
+            ground = f.track[-n:] if f.track is not None and len(f.track) >= n else pts * [1, 1, 0] + [0, 0, 0.08]
+            track = np.concatenate([ground, np.tile([0.47, 0.78, 1.0], (n, 1)), alpha[:, None] * 0.4], 1)
             beam = np.array([[0, 0, 0, 0.95, 0.75, 0.2, 0.7], [0, 0, 60.0, 0.95, 0.75, 0.2, 0.0]])
             self._set(self.p_color, "u_vp", gl(vp))
             data = np.concatenate([path, track, beam]).astype("f4")

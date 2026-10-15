@@ -3,6 +3,7 @@
     lander-viewer                      # follow runs/champion.json, hot-reloading
     lander-viewer --model runs/<run>/best/step_000420000.zip
     lander-viewer --env descent3d --controller zem --seed 1000   # a hand-written controller
+    lander-viewer --env descent3d --controller zem --env-arg terrain=apollo17   # over real terrain
 
 Drawing is done by the env's "scene" (see EnvSpec.scene): for LunarLander a
 custom renderer that reads the physics state and draws the lander, terrain,
@@ -28,6 +29,7 @@ import pygame
 from lander.atomic import read_json
 from lander.champion import CHAMPION_FILE, resolve_model_path
 from lander.checkpoints import load_policy, record_for_checkpoint
+from lander.config import parse_env_args, with_env_args
 from lander.controllers import CONTROLLERS
 from lander.envs import get_spec, make_env
 from lander.hud import Hud
@@ -157,7 +159,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--plain", action="store_true", help="use the env's own rendering instead of the custom scene")
     p.add_argument("--scene", help="pick one of the env's alternative scenes (descent3d: 3d, 2d)")
     p.add_argument("--bdb", help="path to a KSP Bluedog_DB folder, for the 3D Apollo LM model (or set LANDER_BDB)")
-    p.add_argument("--terrain", help="3D ground: apollo11 (real LROC imagery, default) or procedural (or set LANDER_TERRAIN)")
+    p.add_argument("--terrain", help="3D ground on flat-ground envs: apollo11 (real LROC imagery, default), apollo17 or "
+                                    "procedural (or set LANDER_TERRAIN); envs flying over real terrain show their own site")
+    p.add_argument("--env-arg", action="append", default=[], metavar="KEY=VALUE",
+                   help="override an env parameter, e.g. terrain=apollo11 (repeatable)")
     p.add_argument("--mute", action="store_true", help="start with sound off (toggle any time with M)")
     p.add_argument("--volume", type=float, default=0.7, help="master volume, 0..1")
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
@@ -175,6 +180,7 @@ def main(argv: list[str] | None = None) -> None:
     if args.terrain:
         os.environ["LANDER_TERRAIN"] = args.terrain
     runs_dir = args.runs_dir.resolve()
+    env_args = parse_env_args(args.env_arg)
     display = Display(args.fps or 30, args.scale)
     hud = Hud()
     fx = SoundFx(enabled=not args.mute, volume=args.volume)
@@ -218,6 +224,8 @@ def main(argv: list[str] | None = None) -> None:
     while not display.closed and (args.episodes == 0 or episode < args.episodes):
         # --- Between episodes: (re)load the model if the champion changed. ---
         target = fixed or source.poll(force=True)
+        if target is not None:
+            target = with_env_args(target, env_args)
         if target is None:
             if not said_waiting:
                 print(f"waiting for {source.path} ...", flush=True)

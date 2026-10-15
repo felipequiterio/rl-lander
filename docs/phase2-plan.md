@@ -225,6 +225,23 @@ controllers degrade.
   - The physics ground stays flat (imagery only). If the real relief should ever enter
     the dynamics, the DTM is there; but it would also change the G-FOLD problem.
 
+- **Uneven terrain, stage 1 (branch `uneven-terrain`):** descent3d's `terrain` option
+  flies over a real LROC terrain model (Apollo 17: 5 m posts, 1.4 km of relief; Apollo 11:
+  4 m, 116 m). Each episode draws a gentle target (≤ 6°) on the site.
+  - Physics: contact with the real surface; a soft touchdown on more than 12° tips over.
+  - Observation (+13): radar altitude, terrain profile to the target, clearances ahead.
+  - Curriculum: the relief scales with difficulty, from flat to real.
+  - Finding: with this start box (≥ 45° above the target) and a 15° glide slope, real
+    terrain never gets in the way. Only 2% of Apollo 17 targets have terrain above the
+    cone within 1 km, and terrain-blind ZEM/ZEV lands 200/200 there.
+  - PPO: 3/4 seeds learn, reaching 53-63.5% success at Apollo 17 and 75% at Apollo 11
+    (never trained on), with zero terrain-caused failures. The failures are the familiar
+    glide-slope dips and running dry, at about 540 kg of propellant.
+  - Propellant price: 0.3 per kg made 8/8 terrain seeds free-fall into the ground. At
+    0.1 they learn.
+  - Next: make terrain matter. Use shallow approach-phase starts, or let the target
+    move (divert to a safer spot): stage 2.
+
 ## Decisions to confirm
 
 1. **Glide-slope violation ends the episode.** That matches G-FOLD's hard constraint.

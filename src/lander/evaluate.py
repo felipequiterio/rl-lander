@@ -4,6 +4,7 @@
     lander-eval runs/a/best/step_X.zip runs/b/best/step_Y.zip --episodes 500
     lander-eval --out results.json                # also save per-episode results
     lander-eval --env descent3d --controller zem  # a hand-written / optimisation controller
+    lander-eval --runs-dir runs/terrain --env-arg terrain=apollo11  # a terrain policy on another site
 
 Episode i is always reset with seed (--seed + i), so every model faces exactly
 the same start conditions. That makes comparisons paired, which cuts the noise
@@ -32,6 +33,7 @@ import numpy as np
 from lander.atomic import read_json
 from lander.champion import CHAMPION_FILE, resolve_model_path
 from lander.checkpoints import load_policy, record_for_checkpoint
+from lander.config import parse_env_args, with_env_args
 from lander.controllers import CONTROLLERS
 from lander.envs import get_spec, make_env
 
@@ -122,11 +124,14 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--env", help="env registry name (for --controller, or if a checkpoint's run config can't be found)")
     p.add_argument("--controller", action="append", default=[], choices=sorted(CONTROLLERS),
                    help="evaluate a non-learned controller (repeatable); needs --env")
+    p.add_argument("--env-arg", action="append", default=[], metavar="KEY=VALUE",
+                   help="override an env parameter for every model, e.g. terrain=apollo11 (repeatable)")
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
     p.add_argument("--out", type=Path, help="write summaries and per-episode results to this JSON file")
     args = p.parse_args(argv)
 
     paths = [m.resolve() for m in args.models]
+    env_args = parse_env_args(args.env_arg)
     if args.controller and not args.env:
         raise SystemExit("--controller needs --env")
     if not paths and not args.controller:
@@ -138,11 +143,11 @@ def main(argv: list[str] | None = None) -> None:
     report = {"episodes": args.episodes, "seed": args.seed, "deterministic": not args.stochastic, "models": []}
     jobs = []  # (label, record, policy factory)
     for path in paths:
-        record = record_for_checkpoint(path, args.env)
+        record = with_env_args(record_for_checkpoint(path, args.env), env_args)
         label = str(path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path)
         jobs.append((label, record, lambda env, p=path, r=record: load_policy(p, r.get("algo", "PPO"))))
     for name in args.controller:
-        record = {"run_name": f"controller:{name}", "model_path": None, "timestep": None, "env": {"name": args.env, "kwargs": {}}}
+        record = {"run_name": f"controller:{name}", "model_path": None, "timestep": None, "env": {"name": args.env, "kwargs": env_args}}
         jobs.append((f"controller {name}", record, CONTROLLERS[name]))
 
     for label, record, make_policy in jobs:
