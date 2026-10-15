@@ -18,7 +18,8 @@ import sys
 import time
 from pathlib import Path
 
-from lander.champion import CHAMPION_FILE, read_json
+from lander.atomic import read_json
+from lander.champion import CHAMPION_FILE
 from lander.train import default_run_name
 
 

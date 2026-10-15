@@ -21,69 +21,18 @@ slower writer could overwrite a better champion with a worse one.
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from filelock import FileLock
-from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 
+from lander.atomic import atomic_write_json, read_json
+from lander.checkpoints import atomic_save_checkpoint
+
 CHAMPION_FILE = "champion.json"
-
-
-def _replace(src: str, dst: Path) -> None:
-    # On Windows, os.replace fails if another process has dst open at that instant
-    # (e.g. the viewer reading it). It's a transient condition, so retry briefly.
-    for attempt in range(20):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == 19:
-                raise
-            time.sleep(0.05)
-
-
-def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        _replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def atomic_save_model(model: BaseAlgorithm, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Keep a .zip suffix on the temp file, otherwise SB3 appends one to the name.
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp.zip")
-    os.close(fd)
-    try:
-        model.save(tmp)
-        _replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def read_json(path: Path) -> dict[str, Any] | None:
-    """Return the parsed file, or None if it doesn't exist (yet) or can't be read."""
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
-        return None
 
 
 def resolve_model_path(record: dict[str, Any], runs_dir: Path) -> Path:
@@ -137,7 +86,7 @@ class ChampionCallback(BaseCallback):
         step = self.num_timesteps
 
         model_path = self.run_dir / "best" / f"step_{step:09d}.zip"
-        atomic_save_model(self.model, model_path)
+        atomic_save_checkpoint(self.model, model_path)
 
         solved = self.solved_threshold is not None and mean >= self.solved_threshold
         record = {

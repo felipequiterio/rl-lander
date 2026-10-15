@@ -6,7 +6,8 @@ Autonomous powered-descent landing, learned (RL) vs. optimization-based guidance
 Gymnasium's `LunarLander-v3` (continuous actions), several runs at once. A separate
 viewer window continuously flies the best model found so far and swaps in better
 ones as training produces them. Later phases plug a custom 3DOF powered-descent env
-into the same training/eval/viewer code.
+into the same training/eval/viewer code. **Next:** a 3D point-mass lunar descent env
+posed as the G-FOLD problem; see the [Phase 2 plan](docs/phase2-plan.md).
 
 ![Viewer: the champion policy on final approach](docs/viewer.jpg)
 
@@ -16,7 +17,9 @@ src/lander/envs/            env registry: config name -> constructor, outcome cl
 src/lander/envs/lunar_lander_scene.py   the viewer's LunarLander renderer (lander, terrain, effects)
 src/lander/train.py         one headless training run          (lander-train)
 src/lander/launch.py        N runs as parallel processes        (lander-launch)
-src/lander/champion.py      per-run best + global champion, atomic writes
+src/lander/champion.py      per-run best + global champion
+src/lander/checkpoints.py   save/load policies (+ observation-normalisation stats)
+src/lander/evaluate.py      fixed-seed evaluation with success rates and CIs (lander-eval)
 src/lander/viewer.py        live viewer, hot-reloads champion   (lander-viewer)
 src/lander/hud.py           viewer overlay: model card, telemetry, banners (env-agnostic)
 src/lander/sound.py         procedural sound effects for the viewer
@@ -86,6 +89,10 @@ uv run lander-viewer --fps 150 --scale 0.8                        # faster / sma
 uv run lander-viewer --plain                                      # the env's own basic rendering
 uv run lander-viewer --mute                                       # start silent (M toggles sound)
 
+# Evaluate on 200 fixed seeds: the champion, or any checkpoints side by side
+uv run lander-eval
+uv run lander-eval runs/a/best/step_X.zip runs/b/best/step_Y.zip --episodes 500 --out results.json
+
 # TensorBoard: one curve per run; open http://localhost:6006 in your Windows browser
 uv run tensorboard --logdir runs
 ```
@@ -128,6 +135,34 @@ comparable), use another directory: `--runs-dir runs/exp2` on both launcher and 
 The window is resizable and the picture scales to fit. Close it or press `q`/`Esc`
 to quit. The console also logs each load and each episode's outcome.
 
+### Evaluating
+
+`lander-eval` is the measuring stick; the eval score in `champion.json` and the viewer
+are not. Episode *i* always starts from seed `--seed + i`, so every model sees exactly
+the same start conditions and comparisons are paired. It reports:
+
+- **success rate** with a 95% confidence interval (a Wilson interval, which stays sensible
+  near 0% and 100%). "Success" is the env's definition of mission success: for
+  LunarLander that's `landed on pad`, not a reward threshold;
+- the count of every outcome, and mean return with a 95% confidence interval;
+- **landing metrics on the successful episodes**: distance from the pad centre,
+  touchdown speed (at first leg contact), tilt, engine use (a fuel proxy) and duration.
+
+`--out file.json` also saves every episode, for your own analysis. 200 episodes take
+about 10 s.
+
+### Observation normalisation
+
+Set `normalize: true` in a config (or `normalize: {obs: true, reward: true}`) to wrap
+training in SB3's `VecNormalize`. It rescales every observation by a running estimate of
+its mean and standard deviation, so inputs with very different physical scales reach the
+network at a similar size. The network then only understands normalised inputs, so the
+statistics are part of the policy: they're saved beside every checkpoint as
+`step_*.vecnormalize.pkl`, and the viewer and `lander-eval` load them automatically.
+LunarLander's observations are already roughly unit-scale, so the provided config leaves
+normalisation off. Phase 2's physical-unit env needs it. (In a test, one seed with it
+on solved LunarLander at 170k steps instead of 300k.)
+
 ### Outputs
 
 ```
@@ -136,6 +171,7 @@ runs/<run>/config.yaml             the exact config used (incl. seed)
 runs/<run>/train.log               stdout (when started by lander-launch)
 runs/<run>/best.json               this run's best (same format as champion.json)
 runs/<run>/best/step_*.zip         every time the run improved: an immutable checkpoint
+runs/<run>/best/step_*.vecnormalize.pkl   its normalisation stats (only with `normalize`)
 runs/<run>/final_model.zip         the model at the end (or at Ctrl+C)
 runs/<run>/evaluations.npz         all eval results (SB3 EvalCallback format)
 runs/<run>/tb/                     TensorBoard events
@@ -146,6 +182,8 @@ runs/<run>/tb/                     TensorBoard events
 Measured on this machine (20-core CPU) with the provided config, 4 seeds launched
 together:
 
+- **Reliability of the final champion** (`lander-eval`, 200 fixed seeds): 200/200 on the
+  pad (95% CI 98-100%), touchdown at about 1 world unit/s, about 0.4 from the pad centre.
 - **Speed:** ~6,000 env steps/s per run, so 1M steps takes **~3 min**. 4 parallel
   runs finished in 168-176 s each, so they barely slow each other down (one torch
   thread each).

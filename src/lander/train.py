@@ -23,9 +23,10 @@ import yaml
 from stable_baselines3.common.callbacks import EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
-from lander.champion import ChampionCallback, atomic_save_model
+from lander.champion import ChampionCallback
+from lander.checkpoints import atomic_save_checkpoint
 from lander.config import ALGOS, load_config
 from lander.envs import get_spec, make_env
 
@@ -55,6 +56,14 @@ def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
     # training episodes. Eval runs in-process: it's only a few envs.
     eval_cfg = cfg["eval"]
     eval_env = make_vec_env(env_fn, n_envs=eval_cfg["n_envs"], seed=seed + 10_000, vec_env_cls=DummyVecEnv)
+    norm = cfg["normalize"]
+    if norm["obs"] or norm["reward"]:
+        # Reward normalisation only rescales the learning signal; eval always
+        # reports raw episode returns. EvalCallback copies the training env's
+        # running statistics into the (frozen) eval wrapper before each eval.
+        gamma = cfg["ppo"].get("gamma", 0.99)
+        train_env = VecNormalize(train_env, norm_obs=norm["obs"], norm_reward=norm["reward"], clip_obs=norm["clip_obs"], gamma=gamma)
+        eval_env = VecNormalize(eval_env, norm_obs=norm["obs"], norm_reward=False, clip_obs=norm["clip_obs"], training=False)
 
     algo = cfg["algo"]
     model = ALGOS[algo]("MlpPolicy", train_env, seed=seed, device="cpu", verbose=0, **cfg["ppo"])
@@ -92,7 +101,7 @@ def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
     except KeyboardInterrupt:
         print(f"[{run_name}] interrupted, saving final model", flush=True)
     finally:
-        atomic_save_model(model, run_dir / "final_model.zip")
+        atomic_save_checkpoint(model, run_dir / "final_model.zip")
         train_env.close()
         eval_env.close()
     print(

@@ -26,6 +26,12 @@ class EnvSpec:
     outcome: Callable[[gym.Env, bool, bool], str]
     # Mean eval reward at which the task counts as "solved" (None = no threshold).
     solved_threshold: float | None = None
+    # Which outcome labels count as mission success (for lander-eval's success rate).
+    success: frozenset[str] = frozenset()
+    # Optional per-episode metrics for lander-eval: metrics(env, observations, actions)
+    # -> {name: value}, called after the episode with its full trajectory
+    # (observations has one more entry than actions: the reset observation).
+    metrics: Callable[[gym.Env, list, list], dict[str, float]] | None = None
     # Optional custom renderer for the viewer: scene() -> object with the methods
     # of lander.envs.lunar_lander_scene.LunarScene (reset/update/draw/gauges/...).
     # Without one, the viewer shows the env's own rgb_array frames.
@@ -38,6 +44,8 @@ REGISTRY: dict[str, EnvSpec] = {
         outcome=lunar_lander.outcome,
         solved_threshold=lunar_lander.SOLVED_THRESHOLD,
         scene=lunar_lander.scene,
+        success=lunar_lander.SUCCESS,
+        metrics=lunar_lander.metrics,
     ),
 }
 

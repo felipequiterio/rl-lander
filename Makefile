@@ -9,12 +9,13 @@ RUNS   ?= runs
 FPS    ?= 50
 STEPS  ?= 5e4
 MODEL  ?=
+EPISODES ?= 200
 VIEWER_ARGS ?=
 
 UV := uv run
 
 .DEFAULT_GOAL := help
-.PHONY: help setup train smoke launch viewer replay viewer-plain tensorboard lint clean
+.PHONY: help setup train smoke launch viewer replay viewer-plain eval tensorboard lint clean
 
 help: ## Show this help
 	@echo "Usage: make <target> [VAR=value ...]"
@@ -23,7 +24,7 @@ help: ## Show this help
 	@echo
 	@echo "Variables (current value):"
 	@echo "  CONFIG=$(CONFIG)  SEED=$(SEED)  SEEDS=\"$(SEEDS)\"  RUNS=$(RUNS)"
-	@echo "  FPS=$(FPS)  STEPS=$(STEPS)  MODEL=$(MODEL)  VIEWER_ARGS=$(VIEWER_ARGS)"
+	@echo "  FPS=$(FPS)  STEPS=$(STEPS)  EPISODES=$(EPISODES)  MODEL=$(MODEL)  VIEWER_ARGS=$(VIEWER_ARGS)"
 
 setup: ## Create .venv with the locked dependencies (Python 3.11)
 	uv sync
@@ -46,6 +47,9 @@ replay: ## Replay one checkpoint: MODEL=runs/<run>/best/step_*.zip
 
 viewer-plain: ## Viewer with the env's own (plain) rendering
 	$(UV) lander-viewer --runs-dir $(RUNS) --fps $(FPS) --plain $(VIEWER_ARGS)
+
+eval: ## Evaluate on EPISODES fixed seeds: the champion, or MODEL="a.zip b.zip"
+	$(UV) lander-eval $(MODEL) --runs-dir $(RUNS) --episodes $(EPISODES)
 
 tensorboard: ## Open TensorBoard on the runs dir (http://localhost:6006)
 	$(UV) tensorboard --logdir $(RUNS)

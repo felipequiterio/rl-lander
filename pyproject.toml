@@ -17,6 +17,7 @@ dependencies = [
 lander-train = "lander.train:main"
 lander-launch = "lander.launch:main"
 lander-viewer = "lander.viewer:main"
+lander-eval = "lander.evaluate:main"
 
 # CPU-only PyTorch: a small MLP policy gains nothing from a GPU, and the CUDA
 # wheels are ~3 GB. Remove this block if you ever want CUDA torch.

@@ -23,10 +23,10 @@ from typing import Any
 os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
 
 import pygame
-import yaml
 
-from lander.champion import CHAMPION_FILE, read_json, resolve_model_path
-from lander.config import ALGOS
+from lander.atomic import read_json
+from lander.champion import CHAMPION_FILE, resolve_model_path
+from lander.checkpoints import load_policy, record_for_checkpoint
 from lander.envs import get_spec, make_env
 from lander.hud import Hud
 from lander.sound import SoundFx
@@ -130,35 +130,6 @@ class ChampionSource:
         return self.latest
 
 
-def record_for_checkpoint(model_path: Path, env_name: str | None) -> dict[str, Any]:
-    """Build a champion-like record for an arbitrary checkpoint.
-
-    Looks for the run's config.yaml (written by train.py) next to or above the
-    checkpoint to find out which env it was trained on.
-    """
-    record: dict[str, Any] = {
-        "run_name": model_path.parent.name,
-        "model_path": model_path.as_posix(),  # absolute, so resolve_model_path() returns it as-is
-        "timestep": None,
-        "mean_reward": None,
-        "algo": "PPO",
-    }
-    for d in (model_path.parent, model_path.parent.parent):
-        if (d / "config.yaml").exists():
-            with open(d / "config.yaml") as f:
-                cfg = yaml.safe_load(f)
-            record.update(run_name=d.name, env=cfg["env"], algo=cfg.get("algo", "PPO"))
-            run_best = read_json(d / "best.json")
-            if run_best and Path(run_best["model_path"]).name == model_path.name:
-                record.update(timestep=run_best["timestep"], mean_reward=run_best["mean_reward"], std_reward=run_best["std_reward"])
-            break
-    if env_name is not None or "env" not in record:
-        record["env"] = {"name": env_name or "lunar_lander", "kwargs": {}}
-    if record["timestep"] is None and model_path.stem.startswith("step_"):
-        record["timestep"] = int(model_path.stem.removeprefix("step_"))
-    return record
-
-
 def describe(record: dict[str, Any]) -> list[str]:
     step = f"{record['timestep']:,}" if record.get("timestep") is not None else "?"
     if record.get("mean_reward") is not None:
@@ -227,7 +198,7 @@ def main(argv: list[str] | None = None) -> None:
         if loaded is None or target["model_path"] != loaded["model_path"]:
             path = resolve_model_path(target, runs_dir)
             try:
-                model = ALGOS[target.get("algo", "PPO")].load(path, device="cpu")
+                model = load_policy(path, target.get("algo", "PPO"))
             except Exception as e:  # noqa: BLE001 - keep the viewer alive whatever goes wrong
                 print(f"failed to load {path}: {e!r}; retrying", flush=True)
                 if model is None:
@@ -261,7 +232,7 @@ def main(argv: list[str] | None = None) -> None:
         ep_reward, steps, done = 0.0, 0, False
         terminated = truncated = False
         while not done and not display.closed:
-            action, _ = model.predict(obs, deterministic=not args.stochastic)
+            action = model.predict(obs, deterministic=not args.stochastic)
             obs, reward, terminated, truncated, _ = env.step(action)
             ep_reward += float(reward)
             steps += 1
