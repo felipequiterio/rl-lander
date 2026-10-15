@@ -98,3 +98,34 @@ def detail_map(seed: int = 5) -> np.ndarray:
         h += np.where(r < 1, 0.03 * (r**2 - 1), 0.006 * np.exp(-(((r - 1) / 0.3) ** 2))).astype(np.float32) * (R / 12)
     albedo = 0.5 + 0.35 * (h - h.mean()) / (np.abs(h - h.mean()).max() + 1e-9)
     return _pack(_normals_from_height(h, m_px, periodic=True), albedo)
+
+
+# --- real sites (imported LROC imagery, see import_lroc.py) -------------------------------
+
+SITES_DIR = Path(__file__).resolve().parent.parent / "assets"
+
+
+def direction(azimuth_deg_from_east: float, elevation_deg: float) -> np.ndarray:
+    az, el = np.radians(azimuth_deg_from_east), np.radians(elevation_deg)
+    return np.array([np.cos(el) * np.cos(az), np.cos(el) * np.sin(az), np.sin(el)])
+
+
+def load_site(name: str = "apollo11") -> dict | None:
+    """Imagery and metadata for a real landing site, or None if it isn't imported.
+    Images come back with row 0 = south (OpenGL's bottom-up order)."""
+    import json
+
+    from PIL import Image
+
+    folder = SITES_DIR / f"terrain_{name}"
+    if not (folder / "terrain.json").exists():
+        return None
+    meta = json.loads((folder / "terrain.json").read_text())
+
+    def img(entry):
+        return np.ascontiguousarray(np.asarray(Image.open(folder / entry["file"]).convert("L"))[::-1])
+
+    sun = meta["sun"]
+    return {"name": name, "meta": meta, "near": img(meta["near"]), "far": img(meta["far"]),
+            "sun_dir": direction(sun["azimuth_deg_from_east_ccw"], sun["elevation_deg"]),
+            "earth_dir": direction(*meta.get("earth_az_el", (180.0, 66.5)))}

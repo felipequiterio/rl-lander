@@ -19,7 +19,7 @@ COMPARE_SCALE ?= 0.75
 UV := uv run
 
 .DEFAULT_GOAL := help
-.PHONY: help setup train smoke launch viewer replay viewer-plain viewer-ppo viewer-zem viewer-zev viewer-compare _compare-ppo _compare-zem import-assets eval tensorboard test lint clean
+.PHONY: help setup train smoke launch viewer replay viewer-plain viewer-ppo viewer-zem viewer-zev viewer-compare _compare-ppo _compare-zem import-assets import-terrain eval tensorboard test lint clean
 
 help: ## Show this help
 	@echo "Usage: make <target> [VAR=value ...]"
@@ -71,6 +71,9 @@ _compare-zem:
 import-assets: ## Re-import the Apollo LM from a KSP Bluedog_DB install (BDB=...) into src/lander/assets
 	@test -n "$(BDB)" || { echo 'usage: make import-assets BDB="/path/to/GameData/Bluedog_DB"'; exit 1; }
 	$(UV) python -m lander.viz3d.import_bdb "$(BDB)"
+
+import-terrain: ## Re-import the Apollo 11 site imagery from NASA LROC (~200 MB download, cached)
+	$(UV) python -m lander.viz3d.import_lroc
 
 viewer-plain: ## Viewer with the env's own (plain) rendering
 	$(UV) lander-viewer --runs-dir $(RUNS) $(if $(FPS),--fps $(FPS)) --plain $(VIEWER_ARGS)

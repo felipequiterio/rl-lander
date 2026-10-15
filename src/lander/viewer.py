@@ -157,6 +157,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--plain", action="store_true", help="use the env's own rendering instead of the custom scene")
     p.add_argument("--scene", help="pick one of the env's alternative scenes (descent3d: 3d, 2d)")
     p.add_argument("--bdb", help="path to a KSP Bluedog_DB folder, for the 3D Apollo LM model (or set LANDER_BDB)")
+    p.add_argument("--terrain", help="3D ground: apollo11 (real LROC imagery, default) or procedural (or set LANDER_TERRAIN)")
     p.add_argument("--mute", action="store_true", help="start with sound off (toggle any time with M)")
     p.add_argument("--volume", type=float, default=0.7, help="master volume, 0..1")
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
@@ -171,6 +172,8 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.bdb:
         os.environ["LANDER_BDB"] = args.bdb
+    if args.terrain:
+        os.environ["LANDER_TERRAIN"] = args.terrain
     runs_dir = args.runs_dir.resolve()
     display = Display(args.fps or 30, args.scale)
     hud = Hud()

@@ -20,6 +20,7 @@ src/lander/envs/descent3d_scene3d.py    its 3D viewer scene (default): OpenGL, c
 src/lander/envs/descent3d_scene.py      its 2D viewer scene: zooming side view + top-down inset
 src/lander/viz3d/                       3D rendering: moderngl renderer, KSP .mu/.cfg readers, terrain
 src/lander/assets/apollo_lm/            the Apollo LM model (from Bluedog Design Bureau, CC BY-NC-SA 4.0)
+src/lander/assets/terrain_apollo11/     real Apollo 11 site imagery (NASA LROC, public domain)
 src/lander/envs/scene_art.py            art shared by the scenes (sky, Earth, lander sprite, glows)
 src/lander/controllers/     non-learned controllers with the policy API (ZEM/ZEV guidance; G-FOLD next)
 tests/                      pytest suite (`make test`)
@@ -339,8 +340,10 @@ runs/descent3d`). Keep descent3d runs in their own runs dir: the viewer follows 
 champion per directory, and rewards from different envs aren't comparable.
 
 The viewer is **3D** by default:
-- **The lander** flies over a cratered lunar surface under a low sun (14°, as on Apollo
-  landings), with real shadows, starfield and Earth.
+- **The lander** flies over the **real Apollo 11 landing site** in Mare Tranquillitatis
+  (see below), under the sun that lit it in the source images (17° up, in the west),
+  with real shadows, starfield and the Earth where it really stands from there (about
+  66° up, in the west).
 - **The model** is an Apollo LM, tilted to its thrust vector, with an exhaust plume, sparks
   and dust that flies off in lunar-gravity arcs near the surface.
 - **Crashes** end in an explosion and a scorched, tipped-over wreck.
@@ -382,6 +385,25 @@ team (CobaltWolf et al.), licensed
 applies to `src/lander/assets/apollo_lm/` only (see its `ATTRIBUTION.md`): those files
 are attribution-required, non-commercial, and share-alike. The rest of the repo isn't
 affected, but don't use the bundled model commercially.
+
+**Real terrain: Tranquility Base.** The ground is NASA Lunar Reconnaissance Orbiter
+imagery of the Apollo 11 site, bundled in `src/lander/assets/terrain_apollo11/` (3.5 MB):
+- **Imagery:** an LROC Narrow Angle Camera orthophoto at **0.5 m/px** within 512 m of the
+  target and 2 m/px over a 4.2 km x 5.2 km area. Beyond that it's tiled, cross-faded so
+  no seams show.
+- **Landing target:** 25 m south of the real Apollo 11 descent stage, which you can see
+  in the photo (the bright speck with a long shadow). The viewer labels it when the
+  camera is within 600 m. Little West crater is just east of it.
+- **Sun:** estimated by fitting the 2 m stereo terrain model's slopes to the photo's
+  brightness (a 0.71 correlation), so the 3D lander's lighting and shadow match the
+  baked-in shading. The physics ground stays the flat plane z = 0, so the real relief
+  lives only in the imagery.
+- **Re-importing:** `make import-terrain` re-creates the bundle. It range-downloads only
+  the needed rows of the PDS products NAC_DTM_APOLLO11 and
+  NAC_DTM_APOLLO11_M150361817_50CM (about 200 MB, cached in `~/.cache/lander/lroc`).
+- **Credit:** NASA/GSFC/Arizona State University. NASA imagery is public domain.
+- `--terrain procedural` (or `LANDER_TERRAIN=procedural`) switches back to the
+  procedural craters.
 
 **Rendering:** moderngl draws offscreen, and the pygame HUD goes on top.
 - **Under WSL2** the viewer selects Mesa's d3d12 driver, so it runs on the Windows GPU

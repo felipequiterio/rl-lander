@@ -26,7 +26,8 @@ import pygame
 from lander.envs.descent3d_scene import Descent3DScene
 from lander.envs.scene_art import FIRE_RAMP
 from lander.viz3d.glmath import model_matrix, normalize, rotation_z_to
-from lander.viz3d.renderer import SUN_DIR, Frame, Renderer
+from lander.viz3d.renderer import Frame, Renderer
+from lander.viz3d.terrain import load_site
 
 CAMERAS = ("chase", "side", "ground", "orbit")
 LUNAR_G = 1.62
@@ -62,8 +63,12 @@ class Descent3DScene3D(Descent3DScene):
     def __init__(self) -> None:
         super().__init__()
         self.model = load_model()
-        self.renderer = Renderer(self.model, self.size)  # raises if OpenGL is unavailable (callers fall back to 2D)
-        print(f"3D renderer: {self.renderer.gpu}", flush=True)
+        # Real terrain: the Apollo 11 site by default (LANDER_TERRAIN=procedural to switch off).
+        terrain = os.environ.get("LANDER_TERRAIN", "apollo11")
+        self.site = None if terrain == "procedural" else load_site(terrain)
+        self.renderer = Renderer(self.model, self.size, site=self.site)  # raises without OpenGL (callers fall back to 2D)
+        where = self.site["meta"]["site"] if self.site else "procedural craters"
+        print(f"3D renderer: {self.renderer.gpu}; terrain: {where}", flush=True)
         self.camera = 0
         self.key_bindings = {pygame.K_c: self.next_camera}
         self.label_font = pygame.font.SysFont("ubuntu,segoeui,dejavusans,arial", 14)
@@ -125,9 +130,29 @@ class Descent3DScene3D(Descent3DScene):
     def draw(self, canvas: pygame.Surface, env) -> None:
         st = self._state()
         canvas.blit(self.renderer.render(self._frame(st)), (0, 0))
+        self._draw_site_label(canvas)
         self._draw_inset(canvas, st)
         label = self.label_font.render(f"camera: {CAMERAS[self.camera]}   [C] to change", True, (190, 196, 210))
         canvas.blit(label, (16, self.size[1] - 30))
+
+    def _draw_site_label(self, canvas) -> None:
+        """Tag the real Apollo 11 descent stage (visible in the orthophoto) when the camera is near."""
+        if not self.site or "apollo11_lm" not in self.site["meta"]:
+            return
+        x, y = self.site["meta"]["apollo11_lm"]
+        p = np.array([x, y, 0.3, 1.0])
+        if np.linalg.norm(self.cam_eye - p[:3]) > 600:
+            return
+        c = self.renderer.last_vp @ p
+        if c[3] <= 0:
+            return  # behind the camera
+        sx, sy = (c[0] / c[3] * 0.5 + 0.5) * self.size[0], (c[1] / c[3] * 0.5 + 0.5) * self.size[1]
+        if not (0 <= sx <= self.size[0] and 0 <= sy <= self.size[1]):
+            return
+        pygame.draw.line(canvas, (230, 230, 235), (sx, sy), (sx + 18, sy - 26), 1)
+        pygame.draw.circle(canvas, (230, 230, 235), (int(sx), int(sy)), 3, 1)
+        img = self.label_font.render("Apollo 11 LM \u00b7 20 July 1969", True, (235, 235, 240))
+        canvas.blit(img, (sx + 21, sy - 36))
 
     # --- pose, camera ------------------------------------------------------------------
 
@@ -156,7 +181,7 @@ class Descent3DScene3D(Descent3DScene):
             look = centre
         elif mode == "ground":
             # Stand on the sun side of the target, so the lander is front-lit as it comes down.
-            sun_h = normalize(np.array([SUN_DIR[0], SUN_DIR[1], 0.0]))
+            sun_h = normalize(np.array([self.renderer.sun[0], self.renderer.sun[1], 0.0]))
             eye = sun_h * 55.0 + np.array([0, 0, 7.0])
             look = centre
             rng = np.linalg.norm(centre - eye)
@@ -284,6 +309,6 @@ class Descent3DScene3D(Descent3DScene):
             eye=self.cam_eye, look=self.cam_look, fov=self.cam_fov, lander_model=M, charred=self.dead,
             plume_model=plume_model, plume_intensity=plume_k, glow=glow, soft=soft,
             trail=np.array(self.trail3 + [st["r"]]),
-            cone_height=float(np.clip(alt * 1.2, 15.0, 150.0)), limit_ring=alt if alt > 0.5 else None,
+            cone_height=float(np.clip(alt * 1.2, 15.0, 60.0)), limit_ring=alt if alt > 0.5 else None,
             zone_color=(0.3, 1.0, 0.5) if self.pad_ok else (0.95, 0.75, 0.2), ground_glow=ground_glow,
         )

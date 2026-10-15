@@ -1,0 +1,39 @@
+{
+ "site": "Apollo 11 landing site (Tranquility Base), Mare Tranquillitatis",
+ "frame": "metres; x east, y north; origin = the env's landing target",
+ "far": {
+  "file": "far.jpg",
+  "rect": [
+   -3057.0760052148253,
+   -2574.2899219449646,
+   1162.9239947851747,
+   2625.7100780550354
+  ],
+  "m_per_px": 2.0
+ },
+ "near": {
+  "file": "near.jpg",
+  "rect": [
+   -512.0760052148253,
+   -511.7899219449646,
+   511.9239947851747,
+   512.2100780550354
+  ],
+  "m_per_px": 0.5
+ },
+ "apollo11_lm": [
+  -0.0,
+  25.0
+ ],
+ "sun": {
+  "azimuth_deg_from_east_ccw": 180.0,
+  "elevation_deg": 17.0,
+  "fit_correlation": 0.714
+ },
+ "mean_brightness": 0.5139357781391835,
+ "sources": [
+  "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/NAC_DTM/APOLLO11/NAC_DTM_APOLLO11.TIF",
+  "https://pds.lroc.im-ldi.com/data/LRO-L-LROC-5-RDR-V1.0/LROLRC_2001/DATA/SDP/NAC_DTM/APOLLO11/NAC_DTM_APOLLO11_M150361817_50CM.IMG"
+ ],
+ "credit": "NASA/GSFC/Arizona State University (LROC). Public domain."
+}
