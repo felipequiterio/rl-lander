@@ -13,6 +13,9 @@ dependencies = [
     "filelock==3.20.0",
 ]
 
+[dependency-groups]
+dev = ["pytest==9.1.1", "ruff==0.17.0"]
+
 [project.scripts]
 lander-train = "lander.train:main"
 lander-launch = "lander.launch:main"
@@ -35,3 +38,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lander"]
+
+[tool.ruff]
+line-length = 130

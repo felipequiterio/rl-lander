@@ -138,6 +138,26 @@ m'  = -|T| / (Isp g0)    Isp = 311 s, g0 = 9.80665 m/s²
 Phase 3 (not in this plan) then sweeps the uncertainty knobs and compares how both
 controllers degrade.
 
+## Findings so far
+
+- **Milestone 1 (done):**
+  - The env passes `check_env` and a 22-test physics suite.
+  - ZEM/ZEV guidance lands 200/200 nominal seeds (position error < 0.05 m, 352 kg
+    propellant mean). The env is solvable.
+- **Untuned PPO, 1M steps: 0% success.** It converged to "dive and violate the glide slope
+  after ~30 s, burning ~50 kg". With the potential zeroed at terminal states, the total
+  shaping is the same for every ending, so diving costs only the −100 terminal reward
+  and saves propellant. A landing pays more, but exploration never finds one, because the
+  cone ends exploratory episodes early. Candidate fixes for Milestone 4, roughly in order:
+  1. **The planned fallback:** in training, a glide-slope violation becomes a penalty
+     proportional to how deep and how long it is, instead of ending the episode.
+     Eval keeps counting it as a failure.
+  2. **A start-condition curriculum:** begin close to and above the target, then widen
+     to the full box.
+  3. **Rebalance the terminal rewards** (a bigger failure penalty, or a success bonus that
+     depends on touchdown accuracy).
+  4. **SAC**, whose replay buffer and entropy-driven exploration often cope better with this.
+
 ## Decisions to confirm
 
 1. **Glide-slope violation ends the episode.** That matches G-FOLD's hard constraint.

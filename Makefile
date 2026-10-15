@@ -15,7 +15,7 @@ VIEWER_ARGS ?=
 UV := uv run
 
 .DEFAULT_GOAL := help
-.PHONY: help setup train smoke launch viewer replay viewer-plain eval tensorboard lint clean
+.PHONY: help setup train smoke launch viewer replay viewer-plain eval tensorboard test lint clean
 
 help: ## Show this help
 	@echo "Usage: make <target> [VAR=value ...]"
@@ -54,8 +54,11 @@ eval: ## Evaluate on EPISODES fixed seeds: the champion, or MODEL="a.zip b.zip"
 tensorboard: ## Open TensorBoard on the runs dir (http://localhost:6006)
 	$(UV) tensorboard --logdir $(RUNS)
 
+test: ## Run the test suite
+	$(UV) pytest -q
+
 lint: ## Lint the code with ruff
-	uv run --with ruff ruff check src/
+	$(UV) ruff check src/ tests/
 
 clean: ## Remove Python caches (never touches runs/)
 	find . -name __pycache__ -type d -prune -not -path "./.venv/*" -exec rm -rf {} +

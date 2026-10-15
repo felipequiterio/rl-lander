@@ -14,7 +14,7 @@ from typing import Any
 
 import gymnasium as gym
 
-from lander.envs import lunar_lander
+from lander.envs import descent3d, lunar_lander
 
 
 @dataclass(frozen=True)
@@ -46,6 +46,13 @@ REGISTRY: dict[str, EnvSpec] = {
         scene=lunar_lander.scene,
         success=lunar_lander.SUCCESS,
         metrics=lunar_lander.metrics,
+    ),
+    # Phase 2: 3D point-mass lunar powered descent (docs/phase2-plan.md).
+    "descent3d": EnvSpec(
+        make=descent3d.make,
+        outcome=descent3d.outcome,
+        success=descent3d.SUCCESS,
+        metrics=descent3d.metrics,
     ),
 }
 

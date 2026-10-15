@@ -3,6 +3,7 @@
     lander-eval                                   # the current champion
     lander-eval runs/a/best/step_X.zip runs/b/best/step_Y.zip --episodes 500
     lander-eval --out results.json                # also save per-episode results
+    lander-eval --env descent3d --controller zem  # a hand-written / optimisation controller
 
 Episode i is always reset with seed (--seed + i), so every model faces exactly
 the same start conditions. That makes comparisons paired, which cuts the noise
@@ -31,6 +32,7 @@ import numpy as np
 from lander.atomic import read_json
 from lander.champion import CHAMPION_FILE, resolve_model_path
 from lander.checkpoints import load_policy, record_for_checkpoint
+from lander.controllers import CONTROLLERS
 from lander.envs import get_spec, make_env
 
 
@@ -46,10 +48,11 @@ def wilson(successes: int, n: int, z: float = 1.96) -> tuple[float, float]:
     return max(0.0, centre - half), min(1.0, centre + half)
 
 
-def run_episodes(model_path: Path, record: dict[str, Any], episodes: int, seed: int, deterministic: bool) -> list[dict]:
+def run_episodes(make_policy, record: dict[str, Any], episodes: int, seed: int, deterministic: bool) -> list[dict]:
+    """``make_policy(env)`` returns anything with ``predict(obs, deterministic) -> action``."""
     spec = get_spec(record["env"]["name"])
-    policy = load_policy(model_path, record.get("algo", "PPO"))
     env = make_env(record["env"]["name"], **record["env"]["kwargs"])
+    policy = make_policy(env)
     results = []
     for i in range(episodes):
         obs, _ = env.reset(seed=seed + i)
@@ -100,7 +103,7 @@ def summarize(results: list[dict]) -> dict[str, Any]:
 def print_summary(name: str, record: dict[str, Any], s: dict[str, Any]) -> None:
     lo, hi = s["success_ci95"]
     step = f"{record['timestep']:,}" if record.get("timestep") is not None else "?"
-    print(f"\n{name}  (run {record['run_name']}, step {step})")
+    print(f"\n{name}" + (f"  (run {record['run_name']}, step {step})" if record.get("model_path") else ""))
     print(f"  success      {s['success_rate'] * 100:5.1f}%   95% CI [{lo * 100:.1f}, {hi * 100:.1f}]   over {s['episodes']} episodes")
     print("  outcomes     " + ", ".join(f"{k}: {v}" for k, v in s["outcomes"].items()))
     print(f"  return       {s['return_mean']:.1f} +/- {s['return_ci95_halfwidth']:.1f} (95% CI of the mean), std {s['return_std']:.1f}")
@@ -116,27 +119,39 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--runs-dir", type=Path, default=Path("runs"))
     p.add_argument("--episodes", type=int, default=200)
     p.add_argument("--seed", type=int, default=1_000_000, help="episode i uses seed + i (kept away from training/eval seeds)")
-    p.add_argument("--env", help="env registry name, if a checkpoint's run config can't be found")
+    p.add_argument("--env", help="env registry name (for --controller, or if a checkpoint's run config can't be found)")
+    p.add_argument("--controller", action="append", default=[], choices=sorted(CONTROLLERS),
+                   help="evaluate a non-learned controller (repeatable); needs --env")
     p.add_argument("--stochastic", action="store_true", help="sample actions instead of the deterministic mean")
     p.add_argument("--out", type=Path, help="write summaries and per-episode results to this JSON file")
     args = p.parse_args(argv)
 
     paths = [m.resolve() for m in args.models]
-    if not paths:
+    if args.controller and not args.env:
+        raise SystemExit("--controller needs --env")
+    if not paths and not args.controller:
         champ = read_json(args.runs_dir / CHAMPION_FILE)
         if champ is None:
             raise SystemExit(f"no champion in {args.runs_dir}; pass checkpoint paths instead")
         paths = [resolve_model_path(champ, args.runs_dir.resolve())]
 
     report = {"episodes": args.episodes, "seed": args.seed, "deterministic": not args.stochastic, "models": []}
+    jobs = []  # (label, record, policy factory)
     for path in paths:
         record = record_for_checkpoint(path, args.env)
+        label = str(path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path)
+        jobs.append((label, record, lambda env, p=path, r=record: load_policy(p, r.get("algo", "PPO"))))
+    for name in args.controller:
+        record = {"run_name": f"controller:{name}", "model_path": None, "timestep": None, "env": {"name": args.env, "kwargs": {}}}
+        jobs.append((f"controller {name}", record, CONTROLLERS[name]))
+
+    for label, record, make_policy in jobs:
         t0 = time.time()
-        results = run_episodes(path, record, args.episodes, args.seed, not args.stochastic)
+        results = run_episodes(make_policy, record, args.episodes, args.seed, not args.stochastic)
         summary = summarize(results)
-        print_summary(str(path.relative_to(Path.cwd()) if path.is_relative_to(Path.cwd()) else path), record, summary)
+        print_summary(label, record, summary)
         print(f"  ({time.time() - t0:.0f}s)")
-        report["models"].append({"model_path": str(path), "record": record, "summary": summary, "episodes": results})
+        report["models"].append({"label": label, "record": record, "summary": summary, "episodes": results})
 
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

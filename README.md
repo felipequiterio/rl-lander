@@ -15,6 +15,9 @@ posed as the G-FOLD problem; see the [Phase 2 plan](docs/phase2-plan.md).
 configs/ppo_lunar.yaml      run config: env, seed, PPO hyperparameters (annotated)
 src/lander/envs/            env registry: config name -> constructor, outcome classifier, scene
 src/lander/envs/lunar_lander_scene.py   the viewer's LunarLander renderer (lander, terrain, effects)
+src/lander/envs/descent3d.py            Phase 2: 3D point-mass lunar powered descent (G-FOLD problem)
+src/lander/controllers/     non-learned controllers with the policy API (ZEM/ZEV guidance; G-FOLD next)
+tests/                      pytest suite (`make test`)
 src/lander/train.py         one headless training run          (lander-train)
 src/lander/launch.py        N runs as parallel processes        (lander-launch)
 src/lander/champion.py      per-run best + global champion
@@ -269,3 +272,60 @@ Switch to `subproc` if a future env has an expensive `step()`.
   custom scene is optional: copy the method set of `LunarScene` (`reset`, `update`,
   `on_outcome`, `draw`, `gauges`, `banner`, `outcome_tone`, and for sound
   `sound_levels`, `outcome_sound`).
+
+## Phase 2: 3D powered descent (in progress)
+
+`descent3d` is the env Phase 2 is built around: the terminal phase of a lunar landing,
+posed exactly as the G-FOLD problem. The design and the reasoning behind it are in
+[docs/phase2-plan.md](docs/phase2-plan.md).
+
+- **Model:** a point mass with Moon gravity. Thrust is 4.5-27 kN, and the engine can't
+  shut off. The vehicle starts at 8 t with 600 kg of usable propellant, and burns it at
+  `|T|/(Isp g0)` with Isp = 311 s.
+- **Constraints:** thrust may tilt at most 45° from vertical, and the vehicle must stay
+  above a 15° glide-slope cone rising from the edge of the 10 m landing zone.
+- **Control and physics:** a new thrust command at 5 Hz, integrated with RK4 at 0.05 s.
+- **Episode:** each starts 1-2 km up and up to 1 km away from the target, descending at
+  15-40 m/s with up to 30 m/s of sideways drift.
+- **Outcomes:**
+  - `landed on target` (success): touchdown within 10 m, at ≤ 2 m/s vertical and
+    ≤ 1 m/s horizontal speed
+  - `landed off target`
+  - `crashed`
+  - `glide-slope violation`
+  - `out of propellant`
+  - `timeout`
+- **Actions** are mapped into the thrust limits, so those can never be violated; only the
+  glide slope can be.
+- **Reward:** potential-based shaping (proven not to change which policy is optimal),
+  a per-kg propellant cost, and ±100 at the end.
+- **Configurable:** every parameter is a field of `DescentConfig` and can be overridden
+  from a run config's `env.kwargs`.
+
+**Reference controller:** `controllers/zem.py` implements classic ZEM/ZEV guidance, a
+closed-form energy-optimal feedback law. It's the proof that the env is solvable:
+
+```bash
+uv run lander-eval --env descent3d --controller zem
+```
+
+On 200 seeds it lands 200/200 on target, with position error under 0.05 m and 352 kg of
+propellant on average. Because it's energy-optimal rather than fuel-optimal, G-FOLD
+should beat it on propellant.
+
+**First PPO run** (`configs/ppo_descent3d.yaml`, untuned, 1M steps): 0% success. The
+policy found a local optimum: it dives, and every episode ends in a glide-slope
+violation about 30 s in, after burning about 50 kg. The shaping pays out the same
+whatever the ending, so diving costs only the −100 terminal reward and saves propellant.
+A real landing pays more, but exploration never finds one, because the cone ends
+exploratory episodes early. Fixing the training signal is Milestone 4; see the plan.
+
+**Tests:** `make test` checks the physics against closed forms:
+- free fall
+- hover
+- mass flow rate
+- touchdown interpolated to the exact moment of contact
+
+It also checks that actions never leave the feasible thrust set, that touchdown and
+failure outcomes are classified correctly, that the shaping telescopes, that the env
+passes Gymnasium's `check_env`, and that the ZEM controller lands.
