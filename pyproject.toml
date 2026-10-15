@@ -1,0 +1,36 @@
+[project]
+name = "lander"
+version = "0.1.0"
+description = "Autonomous lunar landing: RL training/eval/viewer infrastructure"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "gymnasium[box2d]==1.4.0",
+    "stable-baselines3==2.9.0",
+    "torch==2.14.1",
+    "tensorboard==2.20.0",
+    "pyyaml==6.0.3",
+    "filelock==3.20.0",
+]
+
+[project.scripts]
+lander-train = "lander.train:main"
+lander-launch = "lander.launch:main"
+lander-viewer = "lander.viewer:main"
+
+# CPU-only PyTorch: a small MLP policy gains nothing from a GPU, and the CUDA
+# wheels are ~3 GB. Remove this block if you ever want CUDA torch.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/lander"]
