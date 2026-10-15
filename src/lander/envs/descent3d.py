@@ -332,7 +332,18 @@ class Descent3DEnv(gym.Env):
 
 
 def scene():
-    # Imported lazily: only the viewer needs pygame drawing code.
+    """The 3D scene when OpenGL is available, else the 2D one. Imported lazily: only the
+    viewer needs drawing code."""
+    try:
+        from lander.envs.descent3d_scene3d import Descent3DScene3D
+
+        return Descent3DScene3D()
+    except Exception as e:  # noqa: BLE001 - no OpenGL, missing driver, ...
+        print(f"3D viewer unavailable ({e!r}); using the 2D scene", flush=True)
+        return scene_2d()
+
+
+def scene_2d():
     from lander.envs.descent3d_scene import Descent3DScene
 
     return Descent3DScene()

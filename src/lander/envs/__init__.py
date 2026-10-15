@@ -9,7 +9,7 @@ Phase 2 powered-descent env, write its module and add one ``EnvSpec`` entry to
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import gymnasium as gym
@@ -36,6 +36,8 @@ class EnvSpec:
     # of lander.envs.lunar_lander_scene.LunarScene (reset/update/draw/gauges/...).
     # Without one, the viewer shows the env's own rgb_array frames.
     scene: Callable[[], Any] | None = None
+    # Optional named alternatives, selectable with `lander-viewer --scene NAME`.
+    scenes: dict[str, Callable[[], Any]] = field(default_factory=dict)
 
 
 REGISTRY: dict[str, EnvSpec] = {
@@ -54,6 +56,7 @@ REGISTRY: dict[str, EnvSpec] = {
         success=descent3d.SUCCESS,
         metrics=descent3d.metrics,
         scene=descent3d.scene,
+        scenes={"3d": descent3d.scene, "2d": descent3d.scene_2d},
     ),
 }
 

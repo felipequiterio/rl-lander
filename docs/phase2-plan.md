@@ -205,6 +205,16 @@ controllers degrade.
     which is about half of its 173 kg excess propellant. The rest is a less efficient
     high-altitude phase.
 
+- **3D viewer (branch `viewer-3d`):** the descent3d scene is now real 3D (moderngl
+  offscreen + pygame HUD). The 2D side view hid cross-track motion, so the policy's
+  3D control looked planar.
+  - Optional Apollo LM from the user's Bluedog Design Bureau install, read at runtime
+    with an independent `.mu` reader. It's CC BY-NC-SA, so it's never copied.
+  - Low-sun shadows, normal-mapped craters (the physics ground stays flat), and four
+    cameras.
+  - The glide-slope limit shown as a ring at the lander's altitude.
+  - About 6 ms per frame on the GPU, about 18 ms on the software renderer; 2D fallback.
+
 ## Decisions to confirm
 
 1. **Glide-slope violation ends the episode.** That matches G-FOLD's hard constraint.

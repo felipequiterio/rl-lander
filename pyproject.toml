@@ -11,6 +11,8 @@ dependencies = [
     "tensorboard==2.20.0",
     "pyyaml==6.0.3",
     "filelock==3.20.0",
+    "moderngl==5.13.0",   # 3D viewer (OpenGL, rendered offscreen under the pygame HUD)
+    "pillow==12.3.0",     # texture loading (DDS) for the 3D viewer
 ]
 
 [dependency-groups]

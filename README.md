@@ -16,7 +16,10 @@ configs/ppo_lunar.yaml      run config: env, seed, PPO hyperparameters (annotate
 src/lander/envs/            env registry: config name -> constructor, outcome classifier, scene
 src/lander/envs/lunar_lander_scene.py   the viewer's LunarLander renderer (lander, terrain, effects)
 src/lander/envs/descent3d.py            Phase 2: 3D point-mass lunar powered descent (G-FOLD problem)
-src/lander/envs/descent3d_scene.py      its viewer scene: zooming side view + top-down inset
+src/lander/envs/descent3d_scene3d.py    its 3D viewer scene (default): OpenGL, cameras, effects
+src/lander/envs/descent3d_scene.py      its 2D viewer scene: zooming side view + top-down inset
+src/lander/viz3d/                       3D rendering: moderngl renderer, KSP .mu/.cfg readers, terrain
+src/lander/assets/apollo_lm/            the Apollo LM model (from Bluedog Design Bureau, CC BY-NC-SA 4.0)
 src/lander/envs/scene_art.py            art shared by the scenes (sky, Earth, lander sprite, glows)
 src/lander/controllers/     non-learned controllers with the policy API (ZEM/ZEV guidance; G-FOLD next)
 tests/                      pytest suite (`make test`)
@@ -335,6 +338,59 @@ exploratory episodes early. Fixing the training signal is Milestone 4; see the p
 runs/descent3d`). Keep descent3d runs in their own runs dir: the viewer follows one
 champion per directory, and rewards from different envs aren't comparable.
 
+The viewer is **3D** by default:
+- **The lander** flies over a cratered lunar surface under a low sun (14°, as on Apollo
+  landings), with real shadows, starfield and Earth.
+- **The model** is an Apollo LM, tilted to its thrust vector, with an exhaust plume, sparks
+  and dust that flies off in lunar-gravity arcs near the surface.
+- **Crashes** end in an explosion and a scorched, tipped-over wreck.
+- **Overlays:** the 3D trajectory and its ground track, the landing zone with beacons, a
+  red ring marking the glide-slope limit at the lander's current altitude (it must stay
+  inside), and the glide-slope cone near the ground.
+- **The HUD and top-down inset** are the same as in 2D.
+- **Cameras:** press `C` to cycle between **chase** (behind the lander along its
+  approach), **side**, **ground** (standing at the landing zone on the sun side, with a
+  zoom lens) and **orbit**.
+
+**Comparing PPO with ZEM/ZEV.** These targets fly the same seeded episodes
+(`VIEW_SEED`, default 1000), so the two controllers face identical start conditions:
+```bash
+make viewer-ppo       # the descent3d PPO champion (RUNS3D=runs/descent3d)
+make viewer-zem       # the ZEM/ZEV guidance law (viewer-zev is an alias: it's one law)
+make viewer-compare   # both at once, in two windows side by side (sound from PPO only)
+```
+Two useful variables: `FPS=150` plays at 3x speed, and `COMPARE_SCALE=1.0` makes the
+compare windows larger. Underneath it's `lander-viewer --env descent3d --controller zem
+--seed 1000`.
+
+**Apollo LM model from Bluedog Design Bureau.** The LM is bundled in
+`src/lander/assets/apollo_lm/`: 1.5 MB of merged meshes and 1024px textures. It was
+imported from the KSP mod Bluedog Design Bureau with `make import-assets
+BDB=".../GameData/Bluedog_DB"`, which reads the LM parts from a KSP install:
+- **Parts:** the ascent stage, descent stage, four landing legs posed at the end of
+  their deploy animation, and the descent engine.
+- **Assembly:** stacked at their KSP attach nodes, the default variants chosen, and scaled
+  1.6x to real size.
+
+It uses an independent reader for KSP's `.mu` model format (`src/lander/viz3d/mu.py`;
+taniwha's io_object_mu documented the layout). `--bdb PATH` (or `LANDER_BDB`) makes the
+viewer re-import live instead. If the bundle is missing, a simple built-in LM is used.
+
+**License of the bundled model:** it's derived from Bluedog Design Bureau, © the BDB
+team (CobaltWolf et al.), licensed
+[CC BY-NC-SA 4.0](https://creativecommons.org/licenses/by-nc-sa/4.0/). That license
+applies to `src/lander/assets/apollo_lm/` only (see its `ATTRIBUTION.md`): those files
+are attribution-required, non-commercial, and share-alike. The rest of the repo isn't
+affected, but don't use the bundled model commercially.
+
+**Rendering:** moderngl draws offscreen, and the pygame HUD goes on top.
+- **Under WSL2** the viewer selects Mesa's d3d12 driver, so it runs on the Windows GPU
+  (RTX 3070 here: about 6 ms per frame including the HUD).
+- **Without GPU access** Mesa's software renderer still manages about 18 ms per frame.
+- **Without OpenGL at all** the viewer falls back to the 2D scene; `--scene 2d` picks it
+  explicitly.
+
+**The 2D scene** (`--scene 2d`, or automatic without OpenGL):
 - **Side view:** looks along the approach direction. The camera follows the lander
   and zooms in as it descends, from about 2.5 km wide at the start to tens of metres
   at touchdown. The lander is drawn tilted to its thrust direction, with a plume that

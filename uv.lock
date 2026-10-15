@@ -76,6 +76,19 @@ wheels = [
 ]
 
 [[package]]
+name = "glcontext"
+version = "3.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5f/99/e877a962bfa5783f6c01116483471f0666b53d5f805ea0ebdbb0c66d159b/glcontext-3.1.0.tar.gz", hash = "sha256:754d33f73aaf07e016e503b722e44c6ef914d9f101643be524cb185e1d55717f", size = 16536 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/53/97/0e5273ed7f631d41e51dd73041beebcc3885710a5134c824d4a1b87fb9ac/glcontext-3.1.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:7602670352dfdd680cf3e077a9c70f293f8f3ef368175a727798048148a42f9d", size = 9935 },
+    { url = "https://files.pythonhosted.org/packages/21/01/0e087a9a6953ecb692475c16b93fbcb1257b374febaf65c91c5ab42430b2/glcontext-3.1.0-cp311-cp311-manylinux1_x86_64.manylinux_2_28_x86_64.manylinux_2_5_x86_64.whl", hash = "sha256:5d6afa9d3d99206e487d20255202695031a1db9d4e357470d375301a5688b1b7", size = 47549 },
+    { url = "https://files.pythonhosted.org/packages/89/4c/bcf8ebaa7b7c5061d6fa8d7516379efeedd11d36c8d2194fec831ef68259/glcontext-3.1.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:e0a1f05911e2bb79d991901a997a82ebbad2755f58b1392cc43ba142d5446b7b", size = 46796 },
+    { url = "https://files.pythonhosted.org/packages/49/48/61147c7cefba1ae1f012aafe65a93961421cb31e76ed7181d2c58835d92c/glcontext-3.1.0-cp311-cp311-win32.whl", hash = "sha256:0b3204acd8ad764464eb4eaec1c35d2d680d16d2259165a8eb31e28ea3548128", size = 11796 },
+    { url = "https://files.pythonhosted.org/packages/f8/e4/cf89b7bfaa7d541d9b8dfa19298fae4602b2ccd14c178999e7f0f0d85117/glcontext-3.1.0-cp311-cp311-win_amd64.whl", hash = "sha256:19905a25872770dbefc9c60d31204c8a88f0d3d6d609b9a4b533dd5bd71cabb3", size = 12606 },
+]
+
+[[package]]
 name = "grpcio"
 version = "1.84.0"
 source = { registry = "https://pypi.org/simple" }
@@ -145,6 +158,8 @@ source = { editable = "." }
 dependencies = [
     { name = "filelock" },
     { name = "gymnasium", extra = ["box2d"] },
+    { name = "moderngl" },
+    { name = "pillow" },
     { name = "pyyaml" },
     { name = "stable-baselines3" },
     { name = "tensorboard" },
@@ -162,6 +177,8 @@ dev = [
 requires-dist = [
     { name = "filelock", specifier = "==3.20.0" },
     { name = "gymnasium", extras = ["box2d"], specifier = "==1.4.0" },
+    { name = "moderngl", specifier = "==5.13.0" },
+    { name = "pillow", specifier = "==12.3.0" },
     { name = "pyyaml", specifier = "==6.0.3" },
     { name = "stable-baselines3", specifier = "==2.9.0" },
     { name = "tensorboard", specifier = "==2.20.0" },
@@ -204,6 +221,22 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/1e/e8/44cfcb5ea40e5e43cec7793ef90704ed0c475280839076c4345757eb8e59/markupsafe-3.0.4-cp311-cp311-win32.whl", hash = "sha256:2e5a7cd7fdd14fcb1ae5d7d8bf23d24fbd1daefd1fbca2580132e1ea75f098b5", size = 14094 },
     { url = "https://files.pythonhosted.org/packages/91/89/f2b509f7bf79352e40117824c1070dbeafd4df67031d3fa98165a3134228/markupsafe-3.0.4-cp311-cp311-win_amd64.whl", hash = "sha256:fdb4ca07ab75ffadab4a8b135ad59cdbb3156b99310f3d565370da74a15d6bd3", size = 14328 },
     { url = "https://files.pythonhosted.org/packages/2b/5a/ccf22672a0f64dc682306e288f0dabcb06c7a201f3bb6e6cbf86d9e8ad03/markupsafe-3.0.4-cp311-cp311-win_arm64.whl", hash = "sha256:569d65055d367e3dcdf30c3f41119467b73d9ee9faf332bdf40402644f5ac08e", size = 14188 },
+]
+
+[[package]]
+name = "moderngl"
+version = "5.13.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "glcontext" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/92/8a/c39cf051226c51105aac20bbe613a0ef05d006c2f2b2403fad25ca80a23c/moderngl-5.13.0.tar.gz", hash = "sha256:7e8b39e85702e097c4d680f6cc0c51aabf0c1eac741719a159ac405d37c95404", size = 204155 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8b/3a/1c74417eb1ebac1b777d3b6168743092fa013e3e75565f86211d1b5d7bd3/moderngl-5.13.0-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:7cd9a6bf7274c3b3618b7fdffe52175201c194eba0ffd95fcdd7ed8de5d99dbb", size = 113472 },
+    { url = "https://files.pythonhosted.org/packages/43/29/77d5429faede7873f5124a03cb511423f07a2a69faec529099aeddc94514/moderngl-5.13.0-cp311-cp311-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:bac3293968fe818cc477bda08fa27b952f699e83f5131e0f3fc625f950db4579", size = 301811 },
+    { url = "https://files.pythonhosted.org/packages/6e/fb/a4ea8462cdb324bb47b30e555c0528013188153804ce2f0413fa2f75fac2/moderngl-5.13.0-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:6c5bd1774dae7e7ae393ba0f68143e04f7ece4fccd4b314d43a189844f1b9561", size = 1328281 },
+    { url = "https://files.pythonhosted.org/packages/39/b4/a179f949e45d6380d946c4b6fa63c197e82e692e40564c6436fe121a714e/moderngl-5.13.0-cp311-cp311-win32.whl", hash = "sha256:b8da192d5ab82e11814291c064fc9adc707cb6b365bc7185abcaccc5eb37e4bf", size = 103001 },
+    { url = "https://files.pythonhosted.org/packages/b2/75/59b428f103963a0a71c56deabb4bf4959ba68b9e071817f9a63ce5d7e499/moderngl-5.13.0-cp311-cp311-win_amd64.whl", hash = "sha256:d3a03b3d085b4493707507feb2aa82ce4ef06263223008e1414e13833dd3b02b", size = 110056 },
 ]
 
 [[package]]
