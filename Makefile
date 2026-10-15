@@ -6,15 +6,20 @@ CONFIG ?= configs/ppo_lunar.yaml
 SEED   ?= 0
 SEEDS  ?= 0 1 2 3
 RUNS   ?= runs
-FPS    ?= 50
+FPS    ?=
 STEPS  ?= 5e4
 MODEL  ?=
+EPISODES ?= 200
 VIEWER_ARGS ?=
+BDB    ?= $(LANDER_BDB)
+RUNS3D ?= runs/descent3d
+VIEW_SEED ?= 1000
+COMPARE_SCALE ?= 0.75
 
 UV := uv run
 
 .DEFAULT_GOAL := help
-.PHONY: help setup train smoke launch viewer replay viewer-plain tensorboard lint clean
+.PHONY: help setup train smoke launch viewer replay viewer-plain viewer-ppo viewer-zem viewer-zev viewer-compare _compare-ppo _compare-zem import-assets eval tensorboard test lint clean
 
 help: ## Show this help
 	@echo "Usage: make <target> [VAR=value ...]"
@@ -23,7 +28,9 @@ help: ## Show this help
 	@echo
 	@echo "Variables (current value):"
 	@echo "  CONFIG=$(CONFIG)  SEED=$(SEED)  SEEDS=\"$(SEEDS)\"  RUNS=$(RUNS)"
-	@echo "  FPS=$(FPS)  STEPS=$(STEPS)  MODEL=$(MODEL)  VIEWER_ARGS=$(VIEWER_ARGS)"
+	@echo "  FPS=$(FPS)  STEPS=$(STEPS)  EPISODES=$(EPISODES)  MODEL=$(MODEL)  VIEWER_ARGS=$(VIEWER_ARGS)"
+	@echo "  RUNS3D=$(RUNS3D)  VIEW_SEED=$(VIEW_SEED)  COMPARE_SCALE=$(COMPARE_SCALE)"
+	@echo "  BDB=$(BDB)  (optional: re-import the Apollo LM live from KSP instead of the bundled copy)"
 
 setup: ## Create .venv with the locked dependencies (Python 3.11)
 	uv sync
@@ -38,20 +45,47 @@ launch: ## Train several seeds in parallel: CONFIG, SEEDS
 	$(UV) lander-launch $(CONFIG) --seeds $(SEEDS) --runs-dir $(RUNS)
 
 viewer: ## Watch the current champion, hot-reloading (VIEWER_ARGS=--mute for silence)
-	$(UV) lander-viewer --runs-dir $(RUNS) --fps $(FPS) $(VIEWER_ARGS)
+	$(UV) lander-viewer --runs-dir $(RUNS) $(if $(FPS),--fps $(FPS)) $(if $(BDB),--bdb "$(BDB)") $(VIEWER_ARGS)
 
 replay: ## Replay one checkpoint: MODEL=runs/<run>/best/step_*.zip
 	@test -n "$(MODEL)" || { echo "usage: make replay MODEL=runs/<run>/best/step_000420000.zip"; exit 1; }
-	$(UV) lander-viewer --model $(MODEL) --fps $(FPS) $(VIEWER_ARGS)
+	$(UV) lander-viewer --model $(MODEL) $(if $(FPS),--fps $(FPS)) $(if $(BDB),--bdb "$(BDB)") $(VIEWER_ARGS)
+
+viewer-ppo: ## Watch the descent3d PPO champion (RUNS3D), episodes from VIEW_SEED
+	$(UV) lander-viewer --runs-dir $(RUNS3D) --seed $(VIEW_SEED) --title "PPO champion" $(if $(FPS),--fps $(FPS)) $(if $(BDB),--bdb "$(BDB)") $(VIEWER_ARGS)
+
+viewer-zem: ## Watch the ZEM/ZEV guidance law on descent3d, same episodes as viewer-ppo
+	$(UV) lander-viewer --env descent3d --controller zem --seed $(VIEW_SEED) --title "ZEM/ZEV guidance" $(if $(FPS),--fps $(FPS)) $(if $(BDB),--bdb "$(BDB)") $(VIEWER_ARGS)
+
+viewer-zev: viewer-zem ## Alias of viewer-zem (ZEM/ZEV is one guidance law)
+
+viewer-compare: ## PPO and ZEM/ZEV side by side, same start conditions (sound from PPO only)
+	@$(MAKE) --no-print-directory -j2 _compare-ppo _compare-zem
+
+_compare-ppo:
+	$(UV) lander-viewer --runs-dir $(RUNS3D) --seed $(VIEW_SEED) --title "PPO champion" --scale $(COMPARE_SCALE) --window-pos 0,40 $(if $(FPS),--fps $(FPS)) $(VIEWER_ARGS)
+
+_compare-zem:
+	$(UV) lander-viewer --env descent3d --controller zem --seed $(VIEW_SEED) --title "ZEM/ZEV guidance" --scale $(COMPARE_SCALE) --window-pos 910,40 --mute $(if $(FPS),--fps $(FPS)) $(VIEWER_ARGS)
+
+import-assets: ## Re-import the Apollo LM from a KSP Bluedog_DB install (BDB=...) into src/lander/assets
+	@test -n "$(BDB)" || { echo 'usage: make import-assets BDB="/path/to/GameData/Bluedog_DB"'; exit 1; }
+	$(UV) python -m lander.viz3d.import_bdb "$(BDB)"
 
 viewer-plain: ## Viewer with the env's own (plain) rendering
-	$(UV) lander-viewer --runs-dir $(RUNS) --fps $(FPS) --plain $(VIEWER_ARGS)
+	$(UV) lander-viewer --runs-dir $(RUNS) $(if $(FPS),--fps $(FPS)) --plain $(VIEWER_ARGS)
+
+eval: ## Evaluate on EPISODES fixed seeds: the champion, or MODEL="a.zip b.zip"
+	$(UV) lander-eval $(MODEL) --runs-dir $(RUNS) --episodes $(EPISODES)
 
 tensorboard: ## Open TensorBoard on the runs dir (http://localhost:6006)
 	$(UV) tensorboard --logdir $(RUNS)
 
+test: ## Run the test suite
+	$(UV) pytest -q
+
 lint: ## Lint the code with ruff
-	uv run --with ruff ruff check src/
+	$(UV) ruff check src/ tests/
 
 clean: ## Remove Python caches (never touches runs/)
 	find . -name __pycache__ -type d -prune -not -path "./.venv/*" -exec rm -rf {} +

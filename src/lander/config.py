@@ -19,6 +19,8 @@ DEFAULTS: dict[str, Any] = {
     "vec_env": "dummy",  # "dummy" (all envs in-process) or "subproc" (one process per env)
     "torch_threads": 1,
     "eval": {"freq": 10_000, "n_episodes": 10, "n_envs": 5},
+    # Running mean/std normalisation of observations (and optionally rewards); see checkpoints.py.
+    "normalize": {"obs": False, "reward": False, "clip_obs": 10.0},
     "ppo": {},
 }
 
@@ -32,6 +34,10 @@ def load_config(path: str | Path) -> dict[str, Any]:
         user = yaml.safe_load(f) or {}
     cfg = {**DEFAULTS, **user}
     cfg["eval"] = {**DEFAULTS["eval"], **user.get("eval", {})}
+    norm = user.get("normalize", {})
+    if isinstance(norm, bool):  # `normalize: true` is shorthand for observations only
+        norm = {"obs": norm}
+    cfg["normalize"] = {**DEFAULTS["normalize"], **norm}
     cfg["ppo"] = dict(user.get("ppo") or {})
     for k in _FLOAT_KEYS & cfg["ppo"].keys():
         cfg["ppo"][k] = float(cfg["ppo"][k])

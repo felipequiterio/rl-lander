@@ -21,75 +21,32 @@ slower writer could overwrite a better champion with a worse one.
 
 from __future__ import annotations
 
-import json
-import os
-import tempfile
-import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 from filelock import FileLock
-from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.callbacks import BaseCallback, EvalCallback
 
+from lander.atomic import atomic_write_json, read_json
+from lander.checkpoints import atomic_save_checkpoint
+
 CHAMPION_FILE = "champion.json"
-
-
-def _replace(src: str, dst: Path) -> None:
-    # On Windows, os.replace fails if another process has dst open at that instant
-    # (e.g. the viewer reading it). It's a transient condition, so retry briefly.
-    for attempt in range(20):
-        try:
-            os.replace(src, dst)
-            return
-        except PermissionError:
-            if attempt == 19:
-                raise
-            time.sleep(0.05)
-
-
-def atomic_write_json(path: Path, data: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            json.dump(data, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        _replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def atomic_save_model(model: BaseAlgorithm, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # Keep a .zip suffix on the temp file, otherwise SB3 appends one to the name.
-    fd, tmp = tempfile.mkstemp(dir=path.parent, prefix=f".{path.stem}.", suffix=".tmp.zip")
-    os.close(fd)
-    try:
-        model.save(tmp)
-        _replace(tmp, path)
-    except BaseException:
-        Path(tmp).unlink(missing_ok=True)
-        raise
-
-
-def read_json(path: Path) -> dict[str, Any] | None:
-    """Return the parsed file, or None if it doesn't exist (yet) or can't be read."""
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError, PermissionError):
-        return None
 
 
 def resolve_model_path(record: dict[str, Any], runs_dir: Path) -> Path:
     # Paths are stored relative to the runs dir so the folder can be moved/copied
     # (e.g. between WSL and Windows) without breaking the pointers.
     return (runs_dir / record["model_path"]).resolve()
+
+
+def score(record: dict[str, Any]) -> tuple[float, float]:
+    """How checkpoints are ranked: eval success rate first (when the env reports
+    success), mean eval return as the tie-break. Return alone can be a poor proxy;
+    on descent3d it correlated only ~0.2 with success."""
+    success = record.get("success_rate")
+    return (-1.0 if success is None else success, record["mean_reward"])
 
 
 def try_update_champion(runs_dir: Path, record: dict[str, Any]) -> tuple[bool, dict[str, Any] | None]:
@@ -100,16 +57,16 @@ def try_update_champion(runs_dir: Path, record: dict[str, Any]) -> tuple[bool, d
     path = runs_dir / CHAMPION_FILE
     with FileLock(str(path) + ".lock", timeout=30):
         current = read_json(path)
-        if current is not None and current["mean_reward"] >= record["mean_reward"]:
+        if current is not None and score(current) >= score(record):
             return False, current
         atomic_write_json(path, record)
         return True, current
 
 
 class ChampionCallback(BaseCallback):
-    """Runs as ``EvalCallback(callback_on_new_best=...)``: fires each time this run's
-    mean eval reward reaches a new high. Saves an immutable checkpoint, updates the
-    run's best.json, and tries to become the global champion."""
+    """Runs as ``EvalCallback(callback_after_eval=...)``: after every evaluation, if this
+    checkpoint beats the run's best by ``score()``, saves an immutable checkpoint,
+    updates the run's best.json, and tries to become the global champion."""
 
     parent: EvalCallback
 
@@ -130,14 +87,23 @@ class ChampionCallback(BaseCallback):
         self.algo = algo
         self.solved_threshold = solved_threshold
         self.solved_logged = False
+        self.best: tuple[float, float] | None = None
 
     def _on_step(self) -> bool:
-        rewards = self.parent.evaluations_results[-1]  # episode returns from the eval just run
+        p = self.parent
+        rewards = p.evaluations_results[-1]  # episode returns from the eval just run
         mean, std = float(np.mean(rewards)), float(np.std(rewards))
         step = self.num_timesteps
+        # Success flags for this eval, if the env reports info["is_success"].
+        has_success = len(p.evaluations_successes) == len(p.evaluations_results)
+        success_rate = float(np.mean(p.evaluations_successes[-1])) if has_success else None
+        current = score({"success_rate": success_rate, "mean_reward": mean})
+        if self.best is not None and current <= self.best:
+            return True
+        self.best = current
 
         model_path = self.run_dir / "best" / f"step_{step:09d}.zip"
-        atomic_save_model(self.model, model_path)
+        atomic_save_checkpoint(self.model, model_path)
 
         solved = self.solved_threshold is not None and mean >= self.solved_threshold
         record = {
@@ -147,13 +113,15 @@ class ChampionCallback(BaseCallback):
             "mean_reward": mean,
             "std_reward": std,
             "n_eval_episodes": len(rewards),
+            "success_rate": success_rate,
             "solved": solved,
             "algo": self.algo,
             "env": self.env_cfg,
             "timestamp": datetime.now(UTC).isoformat(timespec="seconds"),
         }
         atomic_write_json(self.run_dir / "best.json", record)
-        print(f"[{self.run_name}] new run best at step {step:,}: {mean:.1f} +/- {std:.1f}", flush=True)
+        succ = f", success {success_rate:.0%}" if success_rate is not None else ""
+        print(f"[{self.run_name}] new run best at step {step:,}: {mean:.1f} +/- {std:.1f}{succ}", flush=True)
 
         if solved and not self.solved_logged:
             self.solved_logged = True
@@ -162,6 +130,11 @@ class ChampionCallback(BaseCallback):
 
         became, previous = try_update_champion(self.runs_dir, record)
         if became:
-            prev = f"{previous['mean_reward']:.1f} ({previous['run_name']})" if previous else "none"
-            print(f"[{self.run_name}] NEW GLOBAL CHAMPION: {mean:.1f} (previous: {prev})", flush=True)
+            prev = f"{_fmt(previous)} ({previous['run_name']})" if previous else "none"
+            print(f"[{self.run_name}] NEW GLOBAL CHAMPION: {_fmt(record)} (previous: {prev})", flush=True)
         return True
+
+
+def _fmt(record: dict[str, Any]) -> str:
+    s = f"{record['mean_reward']:.1f}"
+    return s + (f" / {record['success_rate']:.0%} success" if record.get("success_rate") is not None else "")

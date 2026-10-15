@@ -11,12 +11,18 @@ dependencies = [
     "tensorboard==2.20.0",
     "pyyaml==6.0.3",
     "filelock==3.20.0",
+    "moderngl==5.13.0",   # 3D viewer (OpenGL, rendered offscreen under the pygame HUD)
+    "pillow==12.3.0",     # texture loading (DDS) for the 3D viewer
 ]
+
+[dependency-groups]
+dev = ["pytest==9.1.1", "ruff==0.17.0"]
 
 [project.scripts]
 lander-train = "lander.train:main"
 lander-launch = "lander.launch:main"
 lander-viewer = "lander.viewer:main"
+lander-eval = "lander.evaluate:main"
 
 # CPU-only PyTorch: a small MLP policy gains nothing from a GPU, and the CUDA
 # wheels are ~3 GB. Remove this block if you ever want CUDA torch.
@@ -34,3 +40,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/lander"]
+
+[tool.ruff]
+line-length = 130

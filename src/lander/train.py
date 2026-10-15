@@ -20,18 +20,41 @@ from pathlib import Path
 
 import torch
 import yaml
-from stable_baselines3.common.callbacks import EvalCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList, EvalCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.logger import configure
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
-from lander.champion import ChampionCallback, atomic_save_model
+from lander.champion import ChampionCallback
+from lander.checkpoints import atomic_save_checkpoint
 from lander.config import ALGOS, load_config
 from lander.envs import get_spec, make_env
 
 
 def default_run_name(config_path: Path, seed: int) -> str:
     return f"{config_path.stem}_s{seed}_{time.strftime('%Y%m%d-%H%M%S')}"
+
+
+class CurriculumCallback(BaseCallback):
+    """Ramps a value linearly from ``start`` to ``end`` over the first ``ramp_fraction``
+    of training and passes it to every training env via ``env.<method>(value)``
+    (e.g. descent3d's set_difficulty). The eval env is left alone, so eval always
+    measures the full task."""
+
+    def __init__(self, method: str, start: float, end: float, ramp_steps: int):
+        super().__init__()
+        self.method, self.start, self.end, self.ramp_steps = method, start, end, max(ramp_steps, 1)
+
+    def _value(self) -> float:
+        return self.start + (self.end - self.start) * min(1.0, self.num_timesteps / self.ramp_steps)
+
+    def _on_rollout_start(self) -> None:
+        value = self._value()
+        self.training_env.env_method(self.method, value)
+        self.logger.record("curriculum/value", value)
+
+    def _on_step(self) -> bool:
+        return True
 
 
 def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
@@ -55,6 +78,14 @@ def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
     # training episodes. Eval runs in-process: it's only a few envs.
     eval_cfg = cfg["eval"]
     eval_env = make_vec_env(env_fn, n_envs=eval_cfg["n_envs"], seed=seed + 10_000, vec_env_cls=DummyVecEnv)
+    norm = cfg["normalize"]
+    if norm["obs"] or norm["reward"]:
+        # Reward normalisation only rescales the learning signal; eval always
+        # reports raw episode returns. EvalCallback copies the training env's
+        # running statistics into the (frozen) eval wrapper before each eval.
+        gamma = cfg["ppo"].get("gamma", 0.99)
+        train_env = VecNormalize(train_env, norm_obs=norm["obs"], norm_reward=norm["reward"], clip_obs=norm["clip_obs"], gamma=gamma)
+        eval_env = VecNormalize(eval_env, norm_obs=norm["obs"], norm_reward=False, clip_obs=norm["clip_obs"], training=False)
 
     algo = cfg["algo"]
     model = ALGOS[algo]("MlpPolicy", train_env, seed=seed, device="cpu", verbose=0, **cfg["ppo"])
@@ -75,7 +106,7 @@ def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
     # over a policy that kept changing during the rollout.
     eval_cb = EvalCallback(
         eval_env,
-        callback_on_new_best=champion_cb,
+        callback_after_eval=champion_cb,  # ranks by success rate, then return (champion.score)
         n_eval_episodes=eval_cfg["n_episodes"],
         # EvalCallback counts calls, and each call advances all n_envs envs one step.
         eval_freq=max(eval_cfg["freq"] // cfg["n_envs"], 1),
@@ -88,11 +119,15 @@ def train(cfg: dict, run_name: str, runs_dir: Path) -> None:
     print(f"[{run_name}] training {cfg['total_timesteps']:,} steps -> {run_dir}", flush=True)
     t0 = time.time()
     try:
-        model.learn(total_timesteps=cfg["total_timesteps"], callback=eval_cb)
+        callbacks = [eval_cb]
+        if cur := cfg.get("curriculum"):
+            ramp = int(cur.get("ramp_fraction", 0.6) * cfg["total_timesteps"])
+            callbacks.append(CurriculumCallback(cur["method"], cur.get("start", 0.0), cur.get("end", 1.0), ramp))
+        model.learn(total_timesteps=cfg["total_timesteps"], callback=CallbackList(callbacks))
     except KeyboardInterrupt:
         print(f"[{run_name}] interrupted, saving final model", flush=True)
     finally:
-        atomic_save_model(model, run_dir / "final_model.zip")
+        atomic_save_checkpoint(model, run_dir / "final_model.zip")
         train_env.close()
         eval_env.close()
     print(

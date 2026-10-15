@@ -104,11 +104,16 @@ class Hud:
         self.text(surf, self.f_title, self._fit(self.f_title, record["run_name"], w - 28), (x, y))
         y += 26
         step = record.get("timestep")
-        self.text(surf, self.f_body, f"trained {step:,} steps" if step is not None else "training step unknown", (x, y), "dim")
+        line2 = record.get("line2") or (f"trained {step:,} steps" if step is not None else "training step unknown")
+        self.text(surf, self.f_body, line2, (x, y), "dim")
         y += 22
-        if record.get("mean_reward") is not None:
+        if record.get("line3"):
+            s = record["line3"]
+        elif record.get("mean_reward") is not None:
             n = record.get("n_eval_episodes")
             s = f"eval {record['mean_reward']:.1f} ± {record.get('std_reward', 0):.1f}" + (f"  ({n} ep)" if n else "")
+            if record.get("success_rate") is not None:
+                s += f"  {record['success_rate']:.0%} ok"
         else:
             s = "eval score unknown"
         self.text(surf, self.f_mono, s, (x, y))
